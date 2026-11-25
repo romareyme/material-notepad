@@ -10,7 +10,8 @@ status strip - so the document gets the window.
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?style=flat-square)](#install)
 [![Rust](https://img.shields.io/badge/rust-1.100-DEA584?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-38%20passing-1E8E3E?style=flat-square)](#build-from-source)
+[![Tests](https://img.shields.io/badge/tests-39%20passing-1E8E3E?style=flat-square)](#build-from-source)
+[![Audit](https://img.shields.io/badge/audit-0%20clippy%20warnings-1E8E3E?style=flat-square)](AUDIT.md)
 
 ![Material Notepad, dark theme](docs/screenshots/dark-editor.png)
 
@@ -91,7 +92,7 @@ What that buys you in practice:
 
 ## Install
 
-**1. Installer** - download `MaterialNotepad-1.0.0-setup.exe` from
+**1. Installer** - download `MaterialNotepad-1.0.1-setup.exe` from
 [Releases](https://github.com/romareyme/material-notepad/releases/latest) and run it. It
 installs for the current user into `%LOCALAPPDATA%\Programs\Material Notepad` by default and
 never asks for administrator rights.
@@ -140,7 +141,7 @@ Requirements: Rust (stable), a C toolchain, and - only for the installer - Inno 
 
 ```powershell
 cargo build --release          # target\release\material-notepad.exe
-cargo test                     # 38 tests
+cargo test                     # 39 tests
 python tools\make_icons.py     # regenerate the icon set
 python tools\gen_installer.py  # regenerate installer\MaterialNotepad.iss
 ISCC.exe installer\MaterialNotepad.iss
