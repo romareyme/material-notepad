@@ -55,10 +55,6 @@ impl Settings {
         Color32::from_rgb(self.seed[0], self.seed[1], self.seed[2])
     }
 
-    pub fn set_seed(&mut self, color: Color32) {
-        self.seed = [color.r(), color.g(), color.b()];
-    }
-
     pub fn sanitize(&mut self) {
         self.ui_scale = self.ui_scale.clamp(0.75, 1.75);
         self.editor_font_size = self.editor_font_size.clamp(9.0, 32.0);
@@ -138,22 +134,12 @@ pub struct SessionFile {
     pub eol: Eol,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
     pub files: Vec<SessionFile>,
     pub active: usize,
     pub side_panel: bool,
-}
-
-impl Default for Session {
-    fn default() -> Self {
-        Self {
-            files: Vec::new(),
-            active: 0,
-            side_panel: false,
-        }
-    }
 }
 
 pub fn load_session() -> Session {
@@ -193,9 +179,11 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let mut settings = Settings::default();
-        settings.set_seed(Color32::from_rgb(1, 2, 3));
-        settings.recent.push("a.txt".into());
+        let settings = Settings {
+            seed: [1, 2, 3],
+            recent: vec!["a.txt".into()],
+            ..Default::default()
+        };
         let text = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.seed, [1, 2, 3]);
@@ -204,10 +192,12 @@ mod tests {
 
     #[test]
     fn sanitize_clamps_values() {
-        let mut settings = Settings::default();
-        settings.ui_scale = 99.0;
-        settings.tab_width = 0;
-        settings.editor_font_size = -2.0;
+        let mut settings = Settings {
+            ui_scale: 99.0,
+            tab_width: 0,
+            editor_font_size: -2.0,
+            ..Default::default()
+        };
         settings.sanitize();
         assert_eq!(settings.ui_scale, 1.75);
         assert_eq!(settings.tab_width, 1);
