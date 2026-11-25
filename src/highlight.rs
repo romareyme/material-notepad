@@ -360,65 +360,6 @@ impl Language {
         Language::PlainText
     }
 
-    pub fn extensions(self) -> &'static [&'static str] {
-        match self {
-            Language::C => &["c", "h"],
-            Language::Cpp => &["cpp", "cxx", "cc", "hpp", "hxx", "ino"],
-            Language::CSharp => &["cs"],
-            Language::Java => &["java"],
-            Language::JavaScript => &["js", "mjs", "cjs", "jsx"],
-            Language::TypeScript => &["ts", "tsx"],
-            Language::Python => &["py", "pyw", "pyi"],
-            Language::Rust => &["rs"],
-            Language::Go => &["go"],
-            Language::Ruby => &["rb"],
-            Language::Lua => &["lua"],
-            Language::Perl => &["pl", "pm"],
-            Language::Php => &["php"],
-            Language::Swift => &["swift"],
-            Language::Kotlin => &["kt", "kts"],
-            Language::Scala => &["scala"],
-            Language::Sql => &["sql"],
-            Language::Html => &["html", "htm"],
-            Language::Xml => &["xml", "svg", "xsd", "xsl"],
-            Language::Css => &["css"],
-            Language::Scss => &["scss", "sass"],
-            Language::Json => &["json", "jsonc"],
-            Language::Yaml => &["yaml", "yml"],
-            Language::Toml => &["toml"],
-            Language::Ini => &["ini", "cfg", "conf"],
-            Language::Markdown => &["md", "markdown"],
-            Language::Shell => &["sh", "bash", "zsh"],
-            Language::Batch => &["bat", "cmd"],
-            Language::PowerShell => &["ps1", "psm1"],
-            Language::Makefile => &["mk"],
-            Language::CMake => &["cmake"],
-            Language::Diff => &["diff", "patch"],
-            Language::Dockerfile => &["dockerfile"],
-            Language::Properties => &["properties", "env"],
-            Language::Tex => &["tex", "sty"],
-            Language::R => &["r"],
-            Language::Matlab => &["m"],
-            Language::Haskell => &["hs"],
-            Language::Erlang => &["erl", "hrl"],
-            Language::Elixir => &["ex", "exs"],
-            Language::Clojure => &["clj", "cljs"],
-            Language::Lisp => &["lisp", "el", "scm"],
-            Language::Fortran => &["f", "f90", "f95"],
-            Language::Pascal => &["pas", "pp"],
-            Language::Ada => &["adb", "ads"],
-            Language::Asm => &["asm", "s"],
-            Language::Verilog => &["v", "vh", "sv"],
-            Language::Vhdl => &["vhd", "vhdl"],
-            Language::Graphql => &["graphql", "gql"],
-            Language::Protobuf => &["proto"],
-            Language::Vue => &["vue"],
-            Language::Svelte => &["svelte"],
-            Language::Log => &["log"],
-            _ => &[],
-        }
-    }
-
     fn spec(self) -> Spec {
         let plain = Spec {
             keywords: NO_KEYWORDS,
@@ -831,9 +772,9 @@ impl Language {
 }
 
 /// Highlight a whole document. Spans are sorted, non-overlapping and only
-/// cover tokens (gaps are rendered with the default text colour).
-pub fn highlight(text: &str, language: Language, colors: &SyntaxColors) -> Vec<Span> {
-    let _ = colors;
+/// cover tokens (gaps are rendered with the default text colour). Colors are
+/// resolved at layout time, so the result does not depend on the theme.
+pub fn highlight(text: &str, language: Language) -> Vec<Span> {
     let spec = language.spec();
     let mut spans = Vec::new();
     match spec.special {
@@ -1000,6 +941,10 @@ fn generic(text: &str, spec: &Spec, spans: &mut Vec<Span>) {
         if b.is_ascii_digit() {
             let start = i;
             i += 1;
+            // The two branches do the same thing (advance one byte) but keep
+            // distinct conditions: identifiers/dots versus an exponent sign,
+            // which is only part of the number when a digit follows it.
+            #[allow(clippy::if_same_then_else)]
             while i < len {
                 let c = bytes[i];
                 if c.is_ascii_alphanumeric() || c == b'.' || c == b'_' {
@@ -1007,6 +952,8 @@ fn generic(text: &str, spec: &Spec, spans: &mut Vec<Span>) {
                 } else if (c == b'+' || c == b'-')
                     && i > start
                     && matches!(bytes[i - 1], b'e' | b'E')
+                    && i + 1 < len
+                    && bytes[i + 1].is_ascii_digit()
                 {
                     i += 1;
                 } else {
@@ -1306,7 +1253,6 @@ fn markup(text: &str, spans: &mut Vec<Span>) {
             if i < len && bytes[i] == b'/' {
                 i += 1;
             }
-            let name_start = i;
             while i < len {
                 let c = bytes[i];
                 if c.is_ascii_alphanumeric() || c == b'-' || c == b':' || c == b'_' {
@@ -1316,7 +1262,6 @@ fn markup(text: &str, spans: &mut Vec<Span>) {
                 }
             }
             push(spans, start, i, TokenKind::Tag);
-            let _ = name_start;
             // Attributes until '>'.
             while i < len && bytes[i] != b'>' {
                 if bytes[i] == b'"' || bytes[i] == b'\'' {
@@ -1475,9 +1420,7 @@ fn yaml(text: &str, spans: &mut Vec<Span>) {
         let content = line.trim_end_matches(['\n', '\r']);
         let trimmed = content.trim_start();
         let indent = content.len() - trimmed.len();
-        if trimmed.starts_with('#') {
-            push(spans, offset, offset + content.len(), TokenKind::Comment);
-        } else if trimmed.starts_with("---") || trimmed.starts_with("...") {
+        if trimmed.starts_with('#') || trimmed.starts_with("---") || trimmed.starts_with("...") {
             push(spans, offset, offset + content.len(), TokenKind::Comment);
         } else {
             if let Some(colon) = trimmed.find(':') {
@@ -1706,14 +1649,7 @@ mod tests {
     use super::*;
 
     fn kinds(text: &str, lang: Language) -> Vec<(String, TokenKind)> {
-        let colors = crate::theme::Theme::new(
-            true,
-            eframe::egui::Color32::from_rgb(103, 80, 164),
-            1.0,
-            14.0,
-        )
-        .syntax();
-        highlight(text, lang, &colors)
+        highlight(text, lang)
             .into_iter()
             .map(|s| (text[s.range].to_owned(), s.kind))
             .collect()
@@ -1755,14 +1691,7 @@ mod tests {
     #[test]
     fn spans_are_sorted_and_inside_text() {
         let text = "fn main() { println!(\"h\\u{e9}llo\"); } // \\u{43c}\\u{438}\\u{440}\\n";
-        let colors = crate::theme::Theme::new(
-            false,
-            eframe::egui::Color32::from_rgb(0, 99, 155),
-            1.0,
-            14.0,
-        )
-        .syntax();
-        let spans = highlight(text, Language::Rust, &colors);
+        let spans = highlight(text, Language::Rust);
         let mut last = 0;
         for span in &spans {
             assert!(span.range.start >= last);
