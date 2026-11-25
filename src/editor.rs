@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use eframe::egui::text::{CCursor, CCursorRange};
+use eframe::egui::text_edit::TextEditState;
 use eframe::egui::{
     self, Align2, Color32, FontId, Id, Key, Margin, Modifiers, Pos2, Rect, ScrollArea, Sense,
     Stroke, TextEdit, TextFormat, Ui, Vec2,
@@ -52,7 +53,6 @@ pub struct EditorEvent {
 struct CacheEntry {
     revision: u64,
     language: Language,
-    dark: bool,
     spans: Arc<Vec<Span>>,
 }
 
@@ -63,26 +63,22 @@ pub struct HighlightCache {
 }
 
 impl HighlightCache {
-    fn spans(&mut self, doc: &Document, theme: &Theme) -> Arc<Vec<Span>> {
+    fn spans(&mut self, doc: &Document) -> Arc<Vec<Span>> {
         if let Some(entry) = self.entries.get(&doc.id) {
-            if entry.revision == doc.revision
-                && entry.language == doc.language
-                && entry.dark == theme.dark
-            {
+            if entry.revision == doc.revision && entry.language == doc.language {
                 return entry.spans.clone();
             }
         }
         let spans = if doc.text.len() > MAX_HIGHLIGHT_BYTES {
             Arc::new(Vec::new())
         } else {
-            Arc::new(highlight(&doc.text, doc.language, &theme.syntax()))
+            Arc::new(highlight(&doc.text, doc.language))
         };
         self.entries.insert(
             doc.id,
             CacheEntry {
                 revision: doc.revision,
                 language: doc.language,
-                dark: theme.dark,
                 spans: spans.clone(),
             },
         );
@@ -145,8 +141,6 @@ fn apply_requested_selection(ui: &Ui, id: Id, doc: &mut Document) -> bool {
     true
 }
 
-use eframe::egui::text_edit::TextEditState;
-
 /// Draw the editor for one document and return what changed.
 pub fn show(
     ui: &mut Ui,
@@ -165,7 +159,16 @@ pub fn show(
         .size()
         .x;
     let gutter = if prefs.line_numbers {
-        (digit_width * doc.line_count().to_string().len() as f32 + 12.0).max(30.0)
+        let digits = {
+            let mut count = 1usize;
+            let mut lines = doc.line_count();
+            while lines >= 10 {
+                lines /= 10;
+                count += 1;
+            }
+            count
+        };
+        (digit_width * digits as f32 + 12.0).max(30.0)
     } else {
         0.0
     };
@@ -177,7 +180,7 @@ pub fn show(
     handle_keys(ui, doc, prefs);
     selection_requested |= apply_selection(ui, doc);
 
-    let spans = cache.spans(doc, theme);
+    let spans = cache.spans(doc);
     let background = theme.scheme.surface_container_lowest;
     let gutter_bg = theme.scheme.surface_container_low;
     let gutter_fg = theme.scheme.outline;
@@ -207,7 +210,7 @@ pub fn show(
     let mut scroll_to_line = doc.scroll_to_line.take();
     let viewport_rows = ((ui.available_height() / theme.editor_line_height).ceil() as usize).max(6);
 
-    let scroll = ScrollArea::both()
+    ScrollArea::both()
         .id_source(("editor-scroll", doc.id))
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -317,9 +320,10 @@ pub fn show(
                         }
                     }
                 }
-                // Typing or moving the caret clears a command-made selection.
-                // (response.changed() also fires when the state is stored, so it
-                // is not a usable signal here.)
+                // Any user input that moves the caret clears a command-made
+                // selection: typing, caret keys, and mouse clicks or drags.
+                // (response.changed() also fires when the state is stored, so
+                // it is not a usable signal here.)
                 let typed_or_moved = ui.input(|i| {
                     i.events.iter().any(|event| match event {
                         egui::Event::Text(text) => !text.is_empty(),
@@ -336,6 +340,12 @@ pub fn show(
                                 | Key::PageUp
                                 | Key::PageDown
                         ),
+                        egui::Event::PointerButton {
+                            pressed: true,
+                            button: egui::PointerButton::Primary,
+                            ..
+                        } => true,
+                        egui::Event::PointerGone => true,
                         _ => false,
                     })
                 });
@@ -389,7 +399,6 @@ pub fn show(
             }
         });
 
-    let _ = scroll;
     event
 }
 
@@ -445,7 +454,6 @@ fn paint_gutter(
             line_no += 1;
         }
     }
-    let _ = doc.line_count();
 }
 
 fn line_rect(galley: &egui::Galley, origin: Pos2, line: usize) -> Option<Rect> {
@@ -489,7 +497,7 @@ fn range_rect(
 fn handle_keys(ui: &mut Ui, doc: &mut Document, prefs: &EditorPrefs) {
     // egui 0.27 has no "select all" for TextEdit, so Ctrl+A is handled here.
     // The modifiers come from the event itself: input.modifiers can lag a frame.
-    let select_all = ui.input(|i| {
+    let select_all_pressed = ui.input(|i| {
         i.events.iter().any(|event| match event {
             egui::Event::Key {
                 key: Key::A,
@@ -500,12 +508,8 @@ fn handle_keys(ui: &mut Ui, doc: &mut Document, prefs: &EditorPrefs) {
             _ => false,
         }) || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::A))
     });
-    if select_all {
-        let len = doc.text.len();
-        doc.selection = Some((0, len));
-        doc.requested_selection = Some((0, len));
-        doc.selection_sticky = true;
-        doc.update_cursor(len, Some((0, len)));
+    if select_all_pressed {
+        select_all(doc);
     }
 
     let shift_tab = ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab));
@@ -754,9 +758,6 @@ pub fn delete_line(doc: &mut Document) {
     let line = doc.cursor.line.clamp(1, doc.line_count());
     let range = doc.line_range(line);
     doc.text.replace_range(range.clone(), "");
-    if doc.text.is_empty() {
-        doc.text = String::new();
-    }
     doc.edited();
     let target = line.min(doc.line_count());
     let byte = doc.byte_of(target, 1);
@@ -810,9 +811,13 @@ pub fn goto_line(doc: &mut Document, line: usize) {
     doc.scroll_to_line = Some(line);
 }
 
-/// Select the whole document (Ctrl+A equivalent for menu).
+/// Select the whole document (Ctrl+A and the menu entry).
 pub fn select_all(doc: &mut Document) {
-    doc.requested_selection = Some((0, doc.text.len()));
+    let len = doc.text.len();
+    doc.selection = Some((0, len));
+    doc.requested_selection = Some((0, len));
+    doc.selection_sticky = true;
+    doc.update_cursor(len, Some((0, len)));
 }
 
 #[cfg(test)]
@@ -905,7 +910,7 @@ mod tests {
 
     #[test]
     fn multibyte_offsets_are_snapped() {
-        let mut doc = doc_with("привет");
+        let mut doc = doc_with("РїСЂРёРІРµС‚");
         // 1 is inside the first two-byte character, so it snaps back to 0.
         doc.update_cursor(1, Some((1, 2)));
         assert_eq!(doc.cursor.column, 1);
@@ -922,10 +927,12 @@ mod tests {
         let mut doc = doc_with("hello world");
 
         let mut frame = |ctx: &egui::Context, doc: &mut Document, events: Vec<egui::Event>| {
-            let mut input = egui::RawInput::default();
-            input.events = events;
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
             let mut cache_local = std::mem::take(&mut cache);
-            ctx.run(input, |ctx| {
+            let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     show(ui, &theme, doc, &prefs, &[], None, &mut cache_local);
                 });
@@ -969,5 +976,86 @@ mod tests {
         assert_eq!(doc.text, "", "Backspace did not clear the selection");
         assert_eq!(doc.cursor.line, 1);
         assert_eq!(doc.cursor.column, 1);
+    }
+
+    /// Ctrl+A, then a mouse click that moves the caret, then Backspace: the
+    /// buffer must lose one character, not everything.
+    #[test]
+    fn ctrl_a_click_backspace_deletes_one_character() {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::new(true, Color32::from_rgb(103, 80, 164), 1.0, 14.0);
+        let prefs = EditorPrefs::default();
+        let mut cache = HighlightCache::default();
+        let mut doc = doc_with("hello world");
+
+        let mut frame = |ctx: &egui::Context, doc: &mut Document, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut cache_local = std::mem::take(&mut cache);
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, &theme, doc, &prefs, &[], None, &mut cache_local);
+                });
+            });
+            cache = cache_local;
+        };
+
+        let key = |key: Key, modifiers: egui::Modifiers| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+
+        let id = egui::Id::new(("editor", doc.id));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        frame(&ctx, &mut doc, vec![]);
+        frame(&ctx, &mut doc, vec![]);
+
+        frame(&ctx, &mut doc, vec![key(Key::A, egui::Modifiers::CTRL)]);
+        frame(&ctx, &mut doc, vec![]);
+
+        // A click into the text drops the command selection.
+        let pos = egui::Pos2::new(200.0, 60.0);
+        frame(
+            &ctx,
+            &mut doc,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerGone,
+            ],
+        );
+        frame(&ctx, &mut doc, vec![]);
+        assert!(
+            !doc.selection_sticky,
+            "click did not clear the sticky selection"
+        );
+
+        frame(
+            &ctx,
+            &mut doc,
+            vec![key(Key::Backspace, egui::Modifiers::NONE)],
+        );
+        frame(&ctx, &mut doc, vec![]);
+        assert_eq!(
+            doc.text.len(),
+            "hello world".len() - 1,
+            "Backspace deleted more than the character at the caret"
+        );
     }
 }
