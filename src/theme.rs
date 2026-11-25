@@ -9,8 +9,8 @@
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke};
 
 /// Material tones used by the light and dark schemes.
+#[allow(dead_code)]
 pub mod tone {
-    pub const T0: u8 = 0;
     pub const T4: u8 = 4;
     pub const T6: u8 = 6;
     pub const T10: u8 = 10;
@@ -182,21 +182,14 @@ impl Palette {
         Self { hue, chroma }
     }
 
-    pub fn from_seed(seed: Color32, chroma: f32) -> Self {
-        let lch = color_to_oklch(seed);
-        Self::new(lch.h, chroma)
-    }
-
     pub fn at(&self, tone: u8) -> Color32 {
-        Oklch::new(tone_to_lightness(tone), self.chroma, self.hue).to_color32()
-    }
-
-    pub fn chroma_of(&self, tone: u8) -> Color32 {
         Oklch::new(tone_to_lightness(tone), self.chroma, self.hue).to_color32()
     }
 }
 
-/// The complete set of Material 3 color roles.
+/// The complete set of Material 3 color roles. Some roles are part of the
+/// specification without being referenced by the current widgets.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct Scheme {
     pub primary: Color32,
@@ -375,13 +368,11 @@ impl Scheme {
             Color32::from_black_alpha(40)
         }
     }
-
-    pub fn divider(&self) -> Stroke {
-        Stroke::new(1.0_f32, self.outline_variant)
-    }
 }
 
-/// Material 3 type scale, expressed in points at the current UI scale.
+/// Material 3 type scale, expressed in points at the current UI scale. Some
+/// steps of the scale are part of the specification without being used yet.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Typography {
     pub display_small: FontId,
@@ -417,10 +408,6 @@ impl Typography {
             mono: FontId::new((editor_font_size * scale).round(), FontFamily::Monospace),
             editor_scale: scale,
         }
-    }
-
-    pub fn medium(scale: f32) -> Self {
-        Self::new(scale, 14.0)
     }
 }
 
