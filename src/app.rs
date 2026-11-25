@@ -76,8 +76,6 @@ enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
-    ToggleTheme,
-    ToggleSide,
     Settings,
     About,
     Shortcuts,
@@ -151,6 +149,14 @@ impl FindState {
         }
     }
 
+    /// Close the bar and drop the highlights it painted.
+    fn close(&mut self) {
+        self.open = false;
+        self.matches.clear();
+        self.current = None;
+        self.last_revision = 0;
+    }
+
     fn step(&mut self, doc: &mut Document, forward: bool) {
         if self.matches.is_empty() {
             return;
@@ -186,9 +192,9 @@ impl FindState {
         self.current = next_match(&self.matches, cursor, true, true);
     }
 
-    fn replace_all(&mut self, doc: &mut Document) {
+    fn replace_all(&mut self, doc: &mut Document) -> usize {
         if self.query.is_empty() {
-            return;
+            return 0;
         }
         let replacement = self.replacement.clone();
         match self
@@ -202,9 +208,12 @@ impl FindState {
                 self.refresh(doc);
                 self.current = None;
                 self.error = None;
-                let _ = count;
+                count
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                self.error = Some(error);
+                0
+            }
         }
     }
 }
@@ -253,6 +262,8 @@ pub struct NotepadApp {
     snackbar: Option<Snackbar>,
     highlight: HighlightCache,
     last_session_save: Instant,
+    /// Set when the session on disk is out of date; cleared by persist_session.
+    session_dirty: bool,
     window_title: String,
     /// Document that last received keyboard focus; a change re-focuses the editor.
     focused_doc: Option<u64>,
@@ -299,6 +310,7 @@ impl NotepadApp {
             snackbar: None,
             highlight: HighlightCache::default(),
             last_session_save: Instant::now(),
+            session_dirty: true,
             window_title: String::new(),
             focused_doc: None,
         };
@@ -388,6 +400,7 @@ impl NotepadApp {
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         self.dialog = None;
+        self.session_dirty = true;
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -410,6 +423,7 @@ impl NotepadApp {
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .or_else(|| self.settings.last_folder.clone());
+                self.session_dirty = true;
             }
             Err(error) => {
                 self.dialog = Some(Dialog::Error {
@@ -540,6 +554,7 @@ impl NotepadApp {
         self.docs.remove(index);
         self.highlight.forget(id);
         session::remove_backup(&format!("{id}.txt"));
+        self.session_dirty = true;
         if self.docs.is_empty() {
             self.new_document();
             return;
@@ -595,7 +610,7 @@ impl NotepadApp {
         }
     }
 
-    fn persist_session(&self) {
+    fn persist_session(&mut self) {
         let mut files = Vec::new();
         for doc in &self.docs {
             let backup = if doc.is_dirty() || doc.path.is_none() {
@@ -619,15 +634,16 @@ impl NotepadApp {
         };
         let _ = session::save_session(&session);
         let _ = session::save_settings(&self.settings);
+        self.session_dirty = false;
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
         for doc in &mut self.docs {
-            if doc.path.is_some() && doc.is_dirty() {
+            if doc.path.is_some() {
                 doc.poll_external_change();
             }
         }
-        if self.last_session_save.elapsed() > Duration::from_secs(20) {
+        if self.session_dirty && self.last_session_save.elapsed() > Duration::from_secs(20) {
             self.persist_session();
             self.last_session_save = Instant::now();
         }
@@ -695,7 +711,7 @@ impl NotepadApp {
         if (next - current).abs() > 0.01 {
             self.settings.editor_font_size = next;
             self.snackbar = Some(Snackbar {
-                text: format!("Font size {next:.0} pt"),
+                text: format!("Font size {next:.1} pt"),
                 created: Instant::now(),
             });
         }
@@ -773,7 +789,7 @@ impl NotepadApp {
                 } else if self.menu.is_some() {
                     self.menu = None;
                 } else if self.find.open {
-                    self.find.open = false;
+                    self.find.close();
                 }
             }
         });
@@ -948,10 +964,6 @@ impl NotepadApp {
                 self.settings.editor_font_size = (self.settings.editor_font_size - 1.0).max(9.0);
             }
             Action::ZoomReset => self.settings.editor_font_size = 14.0,
-            Action::ToggleTheme => {
-                self.settings.dark_mode = !self.settings.dark_mode;
-            }
-            Action::ToggleSide => self.side_open = !self.side_open,
             Action::Settings => {
                 self.dialog = Some(Dialog::Settings {
                     draft: self.settings.clone(),
@@ -1092,12 +1104,10 @@ impl NotepadApp {
     // ------------------------------------------------------------ side panels
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme.clone();
         match self.side {
             Side::Files => self.files_panel(ui),
             Side::Search => self.search_panel(ui),
         }
-        let _ = theme;
     }
 
     fn files_panel(&mut self, ui: &mut egui::Ui) {
@@ -1333,7 +1343,7 @@ impl NotepadApp {
                     ui.painter().text(
                         rect.left_top() + Vec2::new(6.0, 22.0),
                         Align2::LEFT_TOP,
-                        truncate(&hit.line_text.trim_start(), 44),
+                        truncate(hit.line_text.trim_start(), 44),
                         theme.type_scale.label_small.clone(),
                         s.on_surface_variant,
                     );
@@ -1372,8 +1382,6 @@ impl NotepadApp {
             ui.ctx().memory_mut(|memory| memory.request_focus(id));
             self.focused_doc = Some(doc_id);
         }
-        let dirty_count = self.docs.iter().filter(|d| d.is_dirty()).count();
-        let _ = dirty_count;
 
         // External change banner.
         if self.docs[self.active].external_change {
@@ -1413,7 +1421,6 @@ impl NotepadApp {
             .show(ui, |ui| {
                 ui.set_min_height(ui.available_height() - 4.0);
                 let current_match = self.find.current;
-                let _ = ();
                 let (docs, find, highlight, theme, prefs) = (
                     &mut self.docs,
                     &mut self.find,
@@ -1433,19 +1440,19 @@ impl NotepadApp {
                 );
                 if event.changed {
                     find.last_revision = 0;
+                    self.session_dirty = true;
                 }
             });
 
         // Floating find bar.
         if self.find.open && self.docs.get(active).is_some() {
-            self.find_bar(ui, doc_id);
+            self.find_bar(ui);
         }
     }
 
-    fn find_bar(&mut self, ui: &mut egui::Ui, doc_id: u64) {
+    fn find_bar(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
         let s = theme.scheme;
-        let _ = doc_id;
         let editor_rect = ui.max_rect();
         let width = 520.0_f32.min(editor_rect.width() - 48.0).max(340.0);
         let pos = Pos2::new(editor_rect.right() - width - 24.0, editor_rect.top() + 12.0);
@@ -1592,7 +1599,7 @@ impl NotepadApp {
             });
 
         if close {
-            self.find.open = false;
+            self.find.close();
         }
         if let Some(forward) = step {
             let active = self.active;
@@ -1617,7 +1624,17 @@ impl NotepadApp {
         if replace_everything {
             let active = self.active;
             if let Some(doc) = self.docs.get_mut(active) {
-                self.find.replace_all(doc);
+                let count = self.find.replace_all(doc);
+                if count > 0 {
+                    self.snackbar = Some(Snackbar {
+                        text: format!(
+                            "Replaced {count} occurrence{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                        created: Instant::now(),
+                    });
+                    self.session_dirty = true;
+                }
             }
         }
     }
@@ -1725,27 +1742,26 @@ impl NotepadApp {
         put(&mut x, &format!("{lines} lines"), s.outline);
 
         // Right side: encoding, line endings and language, each opening a menu.
-        let items: [(String, MenuKind); 3] = [
-            (encoding.label().to_owned(), MenuKind::Encoding),
-            (eol.label().to_owned(), MenuKind::Eol),
-            (language.name().to_owned(), MenuKind::Language),
+        // Labels are laid out once; the same galley is measured and painted.
+        let item_labels: [(&str, MenuKind); 3] = [
+            (encoding.label(), MenuKind::Encoding),
+            (eol.label(), MenuKind::Eol),
+            (language.name(), MenuKind::Language),
         ];
-        let gap = 14.0;
-        let pad_x = 6.0;
-        let widths: Vec<f32> = items
+        let galleys: Vec<std::sync::Arc<egui::Galley>> = item_labels
             .iter()
             .map(|(label, _)| {
                 ui.fonts(|fonts| {
-                    fonts
-                        .layout_no_wrap(label.clone(), font.clone(), s.on_surface_variant)
-                        .size()
-                        .x
-                }) + pad_x * 2.0
+                    fonts.layout_no_wrap((*label).to_owned(), font.clone(), s.on_surface_variant)
+                })
             })
             .collect();
+        let gap = 14.0;
+        let pad_x = 6.0;
+        let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect();
         let mut right = rect.right() - 8.0;
         let mut clicks: Vec<(MenuKind, Rect)> = Vec::new();
-        for (index, (label, kind)) in items.iter().enumerate().rev() {
+        for (index, (_, kind)) in item_labels.iter().enumerate().rev() {
             let width = widths[index];
             let item_rect = Rect::from_min_max(
                 Pos2::new(right - width, rect.top() + 1.0),
@@ -1761,7 +1777,7 @@ impl NotepadApp {
                 );
             }
             let color = s.on_surface_variant;
-            let galley = ui.fonts(|fonts| fonts.layout_no_wrap(label.clone(), font.clone(), color));
+            let galley = galleys[index].clone();
             painter.galley(
                 Pos2::new(
                     item_rect.center().x - galley.size().x / 2.0,
@@ -1770,6 +1786,7 @@ impl NotepadApp {
                 galley,
                 color,
             );
+            let _ = color;
             if response.clicked() {
                 clicks.push((*kind, item_rect));
             }
@@ -2483,12 +2500,7 @@ impl eframe::App for NotepadApp {
         self.handle_shortcuts(ctx);
         self.ensure_theme(ctx);
 
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.menu = None;
-        }
-
-        let theme = self.theme.clone();
-        let s = theme.scheme;
+        let s = self.theme.scheme;
         egui::TopBottomPanel::top("app-bar")
             .exact_height(40.0)
             .frame(
@@ -2530,10 +2542,6 @@ impl eframe::App for NotepadApp {
         self.menus(ctx);
         self.dialogs(ctx);
         self.snackbar_ui(ctx);
-
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.persist_session();
-        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -2833,34 +2841,6 @@ fn dir_row(
         );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn status_button(ui: &mut egui::Ui, theme: &Theme, text: &str) -> egui::Response {
-    let font = theme.type_scale.label_small.clone();
-    let galley =
-        ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, theme.scheme.on_surface_variant));
-    let padding = Vec2::new(6.0, 2.0);
-    let (rect, response) = ui.allocate_exact_size(galley.size() + padding * 2.0, Sense::click());
-    if ui.is_rect_visible(rect) {
-        if response.hovered() {
-            ui.painter().rect_filled(
-                rect,
-                widgets::RADIUS_SMALL,
-                theme.scheme.state_layer(theme.scheme.on_surface, 24),
-            );
-        }
-        ui.painter()
-            .galley(rect.min + padding, galley, theme.scheme.on_surface_variant);
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn separator_dot(ui: &mut egui::Ui, theme: &Theme) {
-    ui.add_space(6.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), 1.5, theme.scheme.outline_variant);
-    ui.add_space(6.0);
 }
 
 fn truncate(text: &str, max: usize) -> String {
