@@ -78,8 +78,6 @@ pub struct FileHit {
     pub line: usize,
     pub column: usize,
     pub line_text: String,
-    pub match_len: usize,
-    pub preview_start: usize,
 }
 
 /// Walk a folder and return matching lines. Bounded by `limit` hits and a
@@ -122,17 +120,11 @@ pub fn find_in_files(
                 .unwrap_or(text.len());
             let line_text = text[line_start..line_end].replace('\t', "    ");
             let column = text[line_start..range.start].chars().count() + 1;
-            let preview_start = text[line_start..range.start]
-                .chars()
-                .count()
-                .saturating_sub(40);
             hits.push(FileHit {
                 path: path.to_path_buf(),
                 line: text[..line_start].matches('\n').count() + 1,
                 column,
                 line_text,
-                match_len: text[range.clone()].chars().count(),
-                preview_start,
             });
             if hits.len() >= limit {
                 return;
