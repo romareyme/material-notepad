@@ -42,17 +42,6 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
-fn state_overlay(theme: &Theme, base: Color32, response: &Response) -> Color32 {
-    let mut color = base;
-    if response.hovered() {
-        color = mix(color, theme.scheme.on_surface, 0.08);
-    }
-    if response.is_pointer_button_down_on() {
-        color = mix(color, theme.scheme.on_surface, 0.10);
-    }
-    color
-}
-
 /// Faux elevation: a few progressively larger, fainter rounded rectangles.
 pub fn soft_shadow(ui: &Ui, rect: egui::Rect, rounding: f32, color: Color32, spread: f32) {
     let painter = ui.painter();
@@ -245,50 +234,6 @@ pub fn icon_button_small(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Extended or regular floating action button.
-pub fn fab(ui: &mut Ui, theme: &Theme, icon: char, label: Option<&str>) -> Response {
-    let s = &theme.scheme;
-    let height = 56.0;
-    let galley = label.map(|l| {
-        ui.fonts(|f| {
-            f.layout_no_wrap(
-                l.to_owned(),
-                theme.type_scale.label_large.clone(),
-                s.on_primary_container,
-            )
-        })
-    });
-    let width = match &galley {
-        Some(g) => 20.0 + 24.0 + 12.0 + g.size().x + 20.0,
-        None => height,
-    };
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
-    if ui.is_rect_visible(rect) {
-        soft_shadow(ui, rect, RADIUS_LARGE, s.shadow_color(theme.dark), 14.0);
-        let painter = ui.painter();
-        painter.rect_filled(rect, RADIUS_LARGE, s.primary_container);
-        let icon_pos = if galley.is_some() {
-            egui::pos2(rect.min.x + 20.0, rect.center().y - 12.0)
-        } else {
-            rect.center() - Vec2::splat(12.0)
-        };
-        let g = ui
-            .fonts(|f| f.layout_no_wrap(icon.to_string(), icon_font(24.0), s.on_primary_container));
-        painter.galley(icon_pos, g, s.on_primary_container);
-        if let Some(label_galley) = &galley {
-            painter.galley(
-                egui::pos2(
-                    rect.min.x + 20.0 + 24.0 + 12.0,
-                    rect.center().y - label_galley.size().y / 2.0,
-                ),
-                label_galley.clone(),
-                s.on_primary_container,
-            );
-        }
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// Filter / assist chip with a check mark when selected.
 pub fn chip(ui: &mut Ui, theme: &Theme, label: &str, selected: bool) -> Response {
     let s = &theme.scheme;
@@ -398,113 +343,10 @@ pub fn text_field(
     response
 }
 
-/// Multiline text area used by preferences and the about dialog.
-pub fn text_area(
-    ui: &mut Ui,
-    theme: &Theme,
-    id: egui::Id,
-    value: &mut String,
-    rows: usize,
-    width: f32,
-) -> Response {
-    let s = &theme.scheme;
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(width, rows as f32 * 20.0 + 24.0), Sense::hover());
-    if ui.is_rect_visible(rect) {
-        ui.painter()
-            .rect_filled(rect, RADIUS_MEDIUM, s.surface_container);
-    }
-    let mut child = ui.child_ui(rect.shrink(10.0), Layout::top_down(Align::Min));
-    child.add(
-        TextEdit::multiline(value)
-            .id(id)
-            .frame(false)
-            .margin(Margin::ZERO)
-            .font(theme.type_scale.body_medium.clone())
-            .text_color(s.on_surface)
-            .desired_width(rect.width() - 20.0),
-    )
-}
-
 /// One tab in the document strip.
 pub struct TabResponse {
     pub response: Response,
     pub close_clicked: bool,
-}
-
-pub fn tab(
-    ui: &mut Ui,
-    theme: &Theme,
-    title: &str,
-    dirty: bool,
-    active: bool,
-    closable: bool,
-) -> TabResponse {
-    let s = &theme.scheme;
-    let font = theme.type_scale.title_small.clone();
-    let galley = ui.fonts(|f| f.layout_no_wrap(title.to_owned(), font, Color32::PLACEHOLDER));
-    let close_w = if closable { 26.0 } else { 0.0 };
-    let width = (galley.size().x + 36.0 + close_w).min(240.0);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click());
-    let rounding = 18.0;
-    let mut close_clicked = false;
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let bg = if active {
-            s.secondary_container
-        } else if response.hovered() {
-            s.surface_container_high
-        } else {
-            Color32::TRANSPARENT
-        };
-        if bg != Color32::TRANSPARENT {
-            painter.rect_filled(rect, rounding, bg);
-        }
-        let fg = if active {
-            s.on_secondary_container
-        } else {
-            s.on_surface_variant
-        };
-        painter.galley(
-            egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
-            galley.clone(),
-            fg,
-        );
-        let close_center = egui::pos2(rect.right() - 18.0, rect.center().y);
-        if closable {
-            let hovered = ui
-                .ctx()
-                .pointer_hover_pos()
-                .map(|p| (p - close_center).length() < 13.0)
-                .unwrap_or(false);
-            if hovered {
-                painter.circle_filled(close_center, 12.0, s.state_layer(s.on_surface, 30));
-            }
-            let close_color = if hovered { s.on_surface } else { fg };
-            let g = ui.fonts(|f| {
-                f.layout_no_wrap(
-                    crate::icons::CLOSE.to_string(),
-                    icon_font(15.0),
-                    close_color,
-                )
-            });
-            painter.galley(close_center - g.size() / 2.0, g, close_color);
-            if response.clicked() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    close_clicked = (pos - close_center).length() < 14.0;
-                }
-            }
-        }
-        if dirty {
-            let dot = egui::pos2(rect.left() + 7.0, rect.center().y);
-            painter.circle_filled(dot, 2.5, s.primary);
-        }
-    }
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    TabResponse {
-        response,
-        close_clicked,
-    }
 }
 
 /// Compact tab for the thin title bar: no pill, an underline marks the active one.
@@ -534,7 +376,6 @@ pub fn tab_compact(
             max_rows: 1,
             break_anywhere: false,
             overflow_character: Some('…'),
-            ..Default::default()
         };
         f.layout_job(job)
     });
@@ -672,14 +513,6 @@ pub fn divider(ui: &mut Ui, theme: &Theme) {
         .rect_filled(rect, 0.0, theme.scheme.outline_variant);
 }
 
-pub fn section_label(ui: &mut Ui, theme: &Theme, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .font(theme.type_scale.label_medium.clone())
-            .color(theme.scheme.primary),
-    );
-}
-
 /// The application mark: a tonal rounded square with document lines.
 pub fn logo(ui: &mut Ui, theme: &Theme, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
@@ -723,9 +556,4 @@ pub fn caption(ui: &mut Ui, theme: &Theme, text: &str, color: Color32) {
             .font(theme.type_scale.label_small.clone())
             .color(color),
     );
-}
-
-/// Align helper: a right aligned horizontal group.
-pub fn right_aligned(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.with_layout(Layout::right_to_left(Align::Center), add);
 }
