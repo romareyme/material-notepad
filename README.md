@@ -61,8 +61,6 @@ What that buys you in practice:
   Symbols icons, Roboto and Roboto Mono embedded in the binary.
 - Light and dark themes from one palette, switchable from the settings panel.
 - Thin 40 px top bar: menu, tabs, find, theme, settings. Everything else is the document.
-- Menus open on a row boundary so a scrolled menu never shows a half row.
-- Ephemeral side panel for search results and the file tree, closed by its header button.
 
 ### Files and session
 
@@ -90,29 +88,6 @@ What that buys you in practice:
 | --- | --- |
 | ![Menu](docs/screenshots/menu.png) | ![Icon set](docs/screenshots/icons-preview.png) |
 
-## Install
-
-**1. Installer** - download `MaterialNotepad-1.0.1-setup.exe` from
-[Releases](https://github.com/romareyme/material-notepad/releases/latest) and run it. It
-installs for the current user into `%LOCALAPPDATA%\Programs\Material Notepad` by default and
-never asks for administrator rights.
-
-**2. Portable** - download `material-notepad-portable.zip`, unpack anywhere, run
-`material-notepad.exe`. To get the Start Menu entry, the file associations and the
-per-type icons:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "Material Notepad\install-per-user.ps1"
-```
-
-Remove it again with `-Uninstall`.
-
-**3. From source** - see below.
-
-> If the installer stops with `Ошибка 5: Отказано в доступе` while creating
-> `%TEMP%\is-XXXX.tmp`, the temporary directory is not writable for that process. Inno Setup
-> unpacks itself before any of this project's code runs, so use the portable archive - it
-> never touches `%TEMP%`.
 
 ## Keyboard shortcuts
 
@@ -135,48 +110,6 @@ Remove it again with `-Uninstall`.
 | Settings | `Ctrl+,` |
 | Shortcut reference | `F1` |
 
-## Build from source
-
-Requirements: Rust (stable), a C toolchain, and - only for the installer - Inno Setup 6.
-
-```powershell
-cargo build --release          # target\release\material-notepad.exe
-cargo test                     # 39 tests
-python tools\make_icons.py     # regenerate the icon set
-python tools\gen_installer.py  # regenerate installer\MaterialNotepad.iss
-ISCC.exe installer\MaterialNotepad.iss
-```
-
-The build embeds `assets/icon.ico` and the version resource through `build.rs`; there is no
-runtime asset directory to ship.
-
-### Project layout
-
-```
-src/app.rs        shell: top bar, tabs, menus, dialogs, status bar, session
-src/editor.rs     the widget: gutter, highlights, selection, key handling
-src/document.rs   text buffer, line index, encodings, EOL, cursor
-src/highlight.rs  lexer and the 52 language definitions
-src/search.rs     find, replace, find in files
-src/theme.rs      OKLCH tonal palettes, light and dark schemes, type scale
-src/widgets.rs    Material 3 buttons, tabs, switches, text fields, menus
-src/icons.rs      Material Symbols subset, generated as glyph codepoints
-src/session.rs    settings, session and backups under %APPDATA%\MaterialNotepad
-vendor/egui-winit patched so Ctrl+letter works on non-Latin layouts
-```
-
-## Configuration
-
-Settings live in `%APPDATA%\MaterialNotepad\settings.json`: theme, palette seed, UI scale,
-editor font size, tab width, spaces for tabs, word wrap, line numbers, session restore and
-the recent list. The session itself and unsaved-buffer backups sit next to it.
-
-## Notes and limitations
-
-- The shipped binary targets Windows 10/11 x64. The code itself is portable Rust + egui.
-- No plugin system and no LSP: this is a text editor, not an IDE.
-- The editor keeps its own caret bookkeeping besides egui's, so a few interactions (undo
-  granularity after a command, for instance) are coarser than in a plain widget.
 
 ## Credits
 
