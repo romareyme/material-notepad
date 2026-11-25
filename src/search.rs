@@ -23,22 +23,6 @@ impl Default for SearchOptions {
     }
 }
 
-impl SearchOptions {
-    pub fn summary(&self) -> String {
-        let mut parts = Vec::new();
-        if self.case_sensitive {
-            parts.push("Aa");
-        }
-        if self.whole_word {
-            parts.push("W");
-        }
-        if self.regex {
-            parts.push(".*");
-        }
-        parts.join(" ")
-    }
-}
-
 /// Compiled finder that only rebuilds its regex when the query changes.
 pub struct Finder {
     query: String,
@@ -59,10 +43,6 @@ impl Finder {
             options: SearchOptions::default(),
             compiled: None,
         }
-    }
-
-    pub fn query(&self) -> &str {
-        &self.query
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -99,19 +79,6 @@ impl Finder {
                 .collect(),
             _ => Vec::new(),
         }
-    }
-
-    pub fn matches_in(
-        &mut self,
-        text: &str,
-        query: &str,
-        options: &SearchOptions,
-        within: Range<usize>,
-    ) -> Vec<Range<usize>> {
-        let all = self.matches(text, query, options);
-        all.into_iter()
-            .filter(|m| m.start >= within.start && m.end <= within.end)
-            .collect()
     }
 
     pub fn replace_all(
