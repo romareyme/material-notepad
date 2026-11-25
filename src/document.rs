@@ -93,12 +93,14 @@ pub fn decode(bytes: &[u8]) -> (String, Encoding, Eol) {
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
             if little_endian {
-                u16::from_le_bytes([c[0], c[1]])
+                u16::from_le_bytes(*c)
             } else {
-                u16::from_be_bytes([c[0], c[1]])
+                u16::from_be_bytes(*c)
             }
         })
         .collect();
@@ -106,12 +108,30 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
 }
 
 fn detect_eol(text: &str) -> Eol {
-    let crlf = text.matches("\r\n").count();
-    let lf = text.matches('\n').count();
-    let cr = text.matches('\r').count();
+    let mut crlf = 0usize;
+    let mut lf = 0usize;
+    let mut lone_cr = 0usize;
+    let mut previous_was_cr = false;
+    for byte in text.bytes() {
+        match byte {
+            b'\r' => {
+                lone_cr += 1;
+                previous_was_cr = true;
+            }
+            b'\n' => {
+                lf += 1;
+                if previous_was_cr {
+                    crlf += 1;
+                    lone_cr -= 1;
+                }
+                previous_was_cr = false;
+            }
+            _ => previous_was_cr = false,
+        }
+    }
     if crlf >= lf.saturating_sub(crlf) && crlf > 0 {
         Eol::CrLf
-    } else if cr > lf {
+    } else if lone_cr > lf {
         Eol::Cr
     } else {
         Eol::Lf
@@ -177,12 +197,12 @@ pub struct Document {
     pub encoding: Encoding,
     pub eol: Eol,
     pub language: Language,
-    pub read_only: bool,
     pub revision: u64,
     pub saved_revision: u64,
     pub cursor: CursorInfo,
     pub saved_at: Option<SystemTime>,
     pub file_mtime: Option<SystemTime>,
+    pub file_len: Option<u64>,
     pub external_change: bool,
     line_starts: Vec<usize>,
     line_char_starts: Vec<usize>,
@@ -192,9 +212,6 @@ pub struct Document {
     pub selection: Option<(usize, usize)>,
     /// Selection requested by a command and applied by the editor widget.
     pub requested_selection: Option<(usize, usize)>,
-    /// Backspace/Delete was pressed with a selection; the buffer is cleared once
-    /// the widget has reported its real selection for this frame.
-    pub clear_selection: bool,
     /// A selection set by a command (Ctrl+A) that the widget's own caret report
     /// must not overwrite until the user types or moves the caret.
     pub selection_sticky: bool,
@@ -210,7 +227,6 @@ impl Document {
             encoding: Encoding::Utf8,
             eol: Eol::Lf,
             language: Language::PlainText,
-            read_only: false,
             revision: 1,
             saved_revision: 1,
             cursor: CursorInfo {
@@ -220,6 +236,7 @@ impl Document {
             },
             saved_at: None,
             file_mtime: None,
+            file_len: None,
             external_change: false,
             line_starts: vec![0],
             line_char_starts: vec![0],
@@ -227,7 +244,6 @@ impl Document {
             scroll_to_line: None,
             selection: None,
             requested_selection: None,
-            clear_selection: false,
             selection_sticky: false,
         };
         doc.language = Language::detect(None, &doc.text, None);
@@ -252,6 +268,7 @@ impl Document {
         doc.encoding = encoding;
         doc.eol = eol;
         doc.file_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
+        doc.file_len = fs::metadata(path).map(|m| m.len()).ok();
         doc.revision = 1;
         doc.saved_revision = 1;
         doc.indexed_revision = 0;
@@ -261,17 +278,6 @@ impl Document {
 
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
-    }
-
-    pub fn display_name(&self) -> &str {
-        &self.title
-    }
-
-    pub fn tooltip(&self) -> String {
-        match &self.path {
-            Some(path) => path.display().to_string(),
-            None => self.title.clone(),
-        }
     }
 
     pub fn ensure_index(&mut self) {
@@ -351,13 +357,8 @@ impl Document {
             .copied()
             .unwrap_or(self.text.len());
         let mut byte = start;
-        let mut col = 1;
-        for (i, ch) in self.text[start..end].char_indices() {
-            if col == column {
-                return start + i;
-            }
-            col += 1;
-            byte = start + i + ch.len_utf8();
+        for ch in self.text[start..end].chars().take(column.saturating_sub(1)) {
+            byte += ch.len_utf8();
         }
         byte.min(end)
     }
@@ -383,7 +384,7 @@ impl Document {
 
     /// Character index (as used by egui text cursors) of a byte offset.
     pub fn char_index(&self, byte: usize) -> usize {
-        let byte = byte.min(self.text.len());
+        let byte = self.snap(byte);
         let (line, _) = self.line_col(byte);
         let idx = line.saturating_sub(1);
         let start_char = self.line_char_starts.get(idx).copied().unwrap_or(0);
@@ -416,20 +417,30 @@ impl Document {
         self.snap(byte.min(line_end_byte))
     }
 
-    pub fn char_len(&self) -> usize {
-        self.text.chars().count()
-    }
-
     pub fn save(&mut self) -> io::Result<()> {
         let path = match &self.path {
             Some(path) => path.clone(),
-            None => return Err(io::Error::new(io::ErrorKind::Other, "document has no path")),
+            None => return Err(io::Error::other("document has no path")),
         };
         let bytes = encode(&self.text, self.encoding, self.eol);
-        fs::write(&path, bytes)?;
+        // Write to a sibling file and rename it into place, so a crash mid-write
+        // cannot leave a truncated document behind.
+        let temp = path.with_extension("mn-save");
+        fs::write(&temp, &bytes)?;
+        match fs::rename(&temp, &path) {
+            Ok(()) => {}
+            Err(_) => {
+                // rename across filesystems or a locked target: fall back to a
+                // direct write, which is still better than losing the save.
+                let result = fs::write(&path, &bytes);
+                let _ = fs::remove_file(&temp);
+                result?;
+            }
+        }
         self.saved_revision = self.revision;
         self.saved_at = Some(SystemTime::now());
         self.file_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        self.file_len = fs::metadata(&path).map(|m| m.len()).ok();
         self.external_change = false;
         Ok(())
     }
@@ -449,15 +460,19 @@ impl Document {
     }
 
     /// Compare the on-disk timestamp with the one captured at load/save.
+    /// Also compares size: replacing a file with an older-timestamped copy
+    /// (git checkout of an older commit) changes nothing about mtime.
     pub fn poll_external_change(&mut self) {
         let Some(path) = &self.path else {
             self.external_change = false;
             return;
         };
-        let now = fs::metadata(path).and_then(|m| m.modified()).ok();
+        let meta = fs::metadata(path).ok();
+        let now = meta.as_ref().and_then(|m| m.modified().ok());
+        let len = meta.as_ref().map(|m| m.len());
         match (now, self.file_mtime) {
             (Some(now), Some(then)) => {
-                if now > then {
+                if now > then || len != self.file_len {
                     self.external_change = true;
                 }
             }
@@ -479,12 +494,13 @@ impl Document {
         self.saved_revision = self.revision;
         self.external_change = false;
         self.file_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        self.file_len = fs::metadata(&path).map(|m| m.len()).ok();
         self.indexed_revision = 0;
         self.ensure_index();
         Ok(())
     }
 
-    /// Record an edit made directly on 	ext and rebuild the line index.
+    /// Record an edit made directly on the text and rebuild the line index.
     pub fn edited(&mut self) {
         self.revision += 1;
         self.indexed_revision = 0;
