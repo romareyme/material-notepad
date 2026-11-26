@@ -25,7 +25,7 @@ HEADER = r'''; Material Notepad installer (Inno Setup 6).
 ; entries are written per user, so a per-user install needs no elevation.
 
 #define AppName "Material Notepad"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 #define AppPublisher "Material Notepad"
 #define AppExeName "material-notepad.exe"
 #define AppId "{{FE899CAE-0B69-4120-8FB3-28A656A47897}"
@@ -58,9 +58,10 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 AllowNoIcons=yes
-UsePreviousTasks=no
+UsePreviousAppDir=yes
+UsePreviousTasks=yes
 CloseApplications=yes
-RestartApplications=no
+RestartApplications=yes
 MinVersion=10.0
 
 [Languages]

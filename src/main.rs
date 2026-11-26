@@ -117,7 +117,13 @@ fn app_icon() -> egui::IconData {
                 && fx <= right
                 && fy >= top
                 && fy <= bottom
-                && rounded_rect_contains(fx - left, fy - top, right - left, radius);
+                && rounded_rect_contains(
+                    fx - left,
+                    fy - top,
+                    right - left,
+                    bottom - top,
+                    radius,
+                );
             // The diagonal cut removes the top-right corner.
             let cut = fx > right - corner
                 && fy < top + corner
@@ -160,21 +166,20 @@ fn app_icon() -> egui::IconData {
     }
 }
 
-fn rounded_rect_contains(x: f32, y: f32, size: f32, radius: f32) -> bool {
-    let (cx, cy) = (x + 0.5, y + 0.5);
-    let inner_min = radius;
-    let inner_max = size - radius;
-    let dx = if cx < inner_min {
-        inner_min - cx
-    } else if cx > inner_max {
-        cx - inner_max
+fn rounded_rect_contains(x: f32, y: f32, width: f32, height: f32, radius: f32) -> bool {
+    let inner_x_max = width - radius;
+    let inner_y_max = height - radius;
+    let dx = if x < radius {
+        radius - x
+    } else if x > inner_x_max {
+        x - inner_x_max
     } else {
         0.0
     };
-    let dy = if cy < inner_min {
-        inner_min - cy
-    } else if cy > inner_max {
-        cy - inner_max
+    let dy = if y < radius {
+        radius - y
+    } else if y > inner_y_max {
+        y - inner_y_max
     } else {
         0.0
     };

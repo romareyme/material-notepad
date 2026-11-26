@@ -175,14 +175,25 @@ impl FindState {
         }
     }
 
-    fn replace_current(&mut self, doc: &mut Document) {
+    fn replace_current(&mut self, doc: &mut Document) -> bool {
         let Some(index) = self.current else {
-            return;
+            return false;
         };
         let Some(range) = self.matches.get(index).cloned() else {
-            return;
+            return false;
         };
-        let replacement = self.replacement.clone();
+        let replacement = match self.finder.replace_match(
+            &doc.text[range.clone()],
+            &self.query,
+            &self.options,
+            &self.replacement,
+        ) {
+            Ok(text) => text,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        };
         doc.text.replace_range(range.clone(), &replacement);
         doc.edited();
         let cursor = (range.start + replacement.len()).min(doc.text.len());
@@ -190,6 +201,7 @@ impl FindState {
         self.last_revision = 0;
         self.refresh(doc);
         self.current = next_match(&self.matches, cursor, true, true);
+        true
     }
 
     fn replace_all(&mut self, doc: &mut Document) -> usize {
@@ -262,8 +274,10 @@ pub struct NotepadApp {
     snackbar: Option<Snackbar>,
     highlight: HighlightCache,
     last_session_save: Instant,
+    last_poll: Instant,
     /// Set when the session on disk is out of date; cleared by persist_session.
     session_dirty: bool,
+    close_all_pending: bool,
     window_title: String,
     /// Document that last received keyboard focus; a change re-focuses the editor.
     focused_doc: Option<u64>,
@@ -278,10 +292,6 @@ impl NotepadApp {
             settings.editor_font_size,
         );
         theme.apply(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(egui::Visuals {
-            dark_mode: theme.dark,
-            ..cc.egui_ctx.style().visuals.clone()
-        });
 
         let mut app = Self {
             docs: Vec::new(),
@@ -310,7 +320,9 @@ impl NotepadApp {
             snackbar: None,
             highlight: HighlightCache::default(),
             last_session_save: Instant::now(),
+            last_poll: Instant::now(),
             session_dirty: true,
+            close_all_pending: false,
             window_title: String::new(),
             focused_doc: None,
         };
@@ -346,6 +358,7 @@ impl NotepadApp {
                         if let Some(text) = session::read_backup(backup) {
                             doc.set_text(text);
                             doc.saved_revision = 0;
+                            doc.backup_name = Some(backup.clone());
                         }
                     }
                     restored = Some(doc);
@@ -356,6 +369,7 @@ impl NotepadApp {
                     self.untitled_counter += 1;
                     doc.set_text(text);
                     doc.saved_revision = 0;
+                    doc.backup_name = Some(backup.clone());
                     restored = Some(doc);
                 }
             }
@@ -485,6 +499,9 @@ impl NotepadApp {
                     self.settings.push_recent(&path);
                 }
                 session::remove_backup(&format!("{}.txt", self.docs[index].id));
+                if let Some(old_backup) = self.docs[index].backup_name.take() {
+                    session::remove_backup(&old_backup);
+                }
                 let name = self.docs[index].title.clone();
                 self.snackbar = Some(Snackbar {
                     text: format!("Saved {name}"),
@@ -519,6 +536,9 @@ impl NotepadApp {
             Ok(()) => {
                 self.settings.push_recent(&path);
                 session::remove_backup(&format!("{}.txt", self.docs[index].id));
+                if let Some(old_backup) = self.docs[index].backup_name.take() {
+                    session::remove_backup(&old_backup);
+                }
                 self.snackbar = Some(Snackbar {
                     text: format!("Saved {}", self.docs[index].title),
                     created: Instant::now(),
@@ -550,10 +570,13 @@ impl NotepadApp {
         if index >= self.docs.len() {
             return;
         }
-        let id = self.docs[index].id;
-        self.docs.remove(index);
+        let mut doc = self.docs.remove(index);
+        let id = doc.id;
         self.highlight.forget(id);
         session::remove_backup(&format!("{id}.txt"));
+        if let Some(old_backup) = doc.backup_name.take() {
+            session::remove_backup(&old_backup);
+        }
         self.session_dirty = true;
         if self.docs.is_empty() {
             self.new_document();
@@ -575,9 +598,17 @@ impl NotepadApp {
             .map(|(i, _)| i)
             .collect();
         if dirty.is_empty() {
-            self.docs.clear();
+            self.close_all_pending = false;
+            for mut doc in self.docs.drain(..) {
+                self.highlight.forget(doc.id);
+                session::remove_backup(&format!("{}.txt", doc.id));
+                if let Some(old_backup) = doc.backup_name.take() {
+                    session::remove_backup(&old_backup);
+                }
+            }
             self.new_document();
         } else {
+            self.close_all_pending = true;
             self.dialog = Some(Dialog::ConfirmClose { index: dirty[0] });
         }
     }
@@ -638,10 +669,13 @@ impl NotepadApp {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
-        for doc in &mut self.docs {
-            if doc.path.is_some() {
-                doc.poll_external_change();
+        if self.last_poll.elapsed() >= Duration::from_secs(2) {
+            for doc in &mut self.docs {
+                if doc.path.is_some() {
+                    doc.poll_external_change();
+                }
             }
+            self.last_poll = Instant::now();
         }
         if self.session_dirty && self.last_session_save.elapsed() > Duration::from_secs(20) {
             self.persist_session();
@@ -718,6 +752,13 @@ impl NotepadApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() {
+            if ctx.input(|input| pressed(input, Key::Escape)) {
+                self.dialog = None;
+                self.close_all_pending = false;
+            }
+            return;
+        }
         let mut action: Option<Action> = None;
         let mut modifiers = Modifiers::NONE;
         ctx.input(|input| {
@@ -1303,6 +1344,8 @@ impl NotepadApp {
                 self.search.results = hits;
                 self.search.receiver = None;
                 self.search.searched = true;
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
             }
         }
         ui.add_space(4.0);
@@ -1618,7 +1661,9 @@ impl NotepadApp {
         if replace_one {
             let active = self.active;
             if let Some(doc) = self.docs.get_mut(active) {
-                self.find.replace_current(doc);
+                if self.find.replace_current(doc) {
+                    self.session_dirty = true;
+                }
             }
         }
         if replace_everything {
@@ -2190,16 +2235,24 @@ impl NotepadApp {
         }
         if let Some(encoding) = chosen_encoding {
             if let Some(doc) = self.active_doc_mut() {
-                doc.encoding = encoding;
-                if encoding != Encoding::Utf8 && doc.eol == Eol::Cr {
-                    doc.eol = Eol::Lf;
+                if doc.encoding != encoding {
+                    doc.encoding = encoding;
+                    if encoding != Encoding::Utf8 && doc.eol == Eol::Cr {
+                        doc.eol = Eol::Lf;
+                    }
+                    doc.edited();
+                    self.session_dirty = true;
                 }
             }
             self.menu = None;
         }
         if let Some(eol) = chosen_eol {
             if let Some(doc) = self.active_doc_mut() {
-                doc.eol = eol;
+                if doc.eol != eol {
+                    doc.eol = eol;
+                    doc.edited();
+                    self.session_dirty = true;
+                }
             }
             self.menu = None;
         }
@@ -2278,7 +2331,7 @@ impl NotepadApp {
                                 .color(s.on_surface),
                         );
                         ui.label(
-                            RichText::new("Version 1.0 - Rust")
+                            RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION"), " - Rust"))
                                 .font(theme.type_scale.label_large.clone())
                                 .color(s.primary),
                         );
@@ -2440,18 +2493,27 @@ impl NotepadApp {
         }
 
         if let Some((index, save)) = confirm {
+            let mut removed = false;
             if save {
                 if self.save_document(index) {
                     self.remove_doc(index);
+                    removed = true;
                 }
             } else {
                 self.remove_doc(index);
+                removed = true;
             }
             self.dialog = None;
+            if removed && self.close_all_pending {
+                self.close_all();
+            } else if !removed {
+                self.close_all_pending = false;
+            }
             return;
         }
         if close {
             self.dialog = None;
+            self.close_all_pending = false;
         } else {
             self.dialog = Some(dialog);
         }

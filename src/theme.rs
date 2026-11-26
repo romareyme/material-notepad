@@ -417,6 +417,7 @@ pub struct Theme {
     pub dark: bool,
     pub seed: Color32,
     pub scheme: Scheme,
+    pub syntax: SyntaxColors,
     pub type_scale: Typography,
     pub editor_font_size: f32,
     pub editor_line_height: f32,
@@ -429,11 +430,13 @@ impl Theme {
         } else {
             Scheme::light(seed)
         };
+        let syntax = compute_syntax_colors(dark, seed, scheme);
         let line_height = (editor_font_size * scale * 1.55).round();
         Self {
             dark,
             seed,
             scheme,
+            syntax,
             type_scale: Typography::new(scale, editor_font_size),
             editor_font_size: editor_font_size * scale,
             editor_line_height: line_height,
@@ -445,40 +448,8 @@ impl Theme {
     }
 
     /// Colors for syntax highlighting; readable on `surface_container_lowest`.
-    ///
-    /// Syntax needs more hue separation than the UI roles provide, so these are
-    /// OKLCH colours anchored to the seed hue with fixed, harmonious accents.
     pub fn syntax(&self) -> SyntaxColors {
-        let dark = self.dark;
-        let s = self.scheme;
-        let h = color_to_oklch(self.seed).h;
-        let hue = |offset: f32| (h + offset).rem_euclid(360.0);
-        let tone = |offset: f32, chroma: f32, lightness: f32| {
-            Oklch::new(lightness, chroma, hue(offset)).to_color32()
-        };
-        let l = if dark { 0.82 } else { 0.46 };
-        SyntaxColors {
-            text: s.on_surface,
-            keyword: tone(0.0, 0.15, l),
-            type_name: tone(52.0, 0.10, if dark { 0.84 } else { 0.44 }),
-            function: tone(310.0, 0.12, if dark { 0.85 } else { 0.45 }),
-            string: Oklch::new(if dark { 0.79 } else { 0.45 }, 0.12, 155.0).to_color32(),
-            number: Oklch::new(if dark { 0.83 } else { 0.47 }, 0.13, 75.0).to_color32(),
-            comment: if dark {
-                Color32::from_gray(138)
-            } else {
-                Color32::from_gray(118)
-            },
-            operator: s.on_surface_variant,
-            punctuation: s.on_surface_variant,
-            preprocessor: tone(20.0, 0.12, if dark { 0.80 } else { 0.45 }),
-            constant: tone(330.0, 0.14, if dark { 0.82 } else { 0.46 }),
-            attribute: Oklch::new(if dark { 0.82 } else { 0.47 }, 0.11, 95.0).to_color32(),
-            tag: tone(8.0, 0.14, if dark { 0.80 } else { 0.45 }),
-            heading: tone(0.0, 0.15, if dark { 0.87 } else { 0.42 }),
-            link: Oklch::new(if dark { 0.80 } else { 0.46 }, 0.13, 235.0).to_color32(),
-            invalid: s.error,
-        }
+        self.syntax
     }
 
     /// Install fonts and global egui visuals for this theme.
@@ -560,6 +531,37 @@ pub struct SyntaxColors {
     pub heading: Color32,
     pub link: Color32,
     pub invalid: Color32,
+}
+
+fn compute_syntax_colors(dark: bool, seed: Color32, s: Scheme) -> SyntaxColors {
+    let h = color_to_oklch(seed).h;
+    let hue = |offset: f32| (h + offset).rem_euclid(360.0);
+    let tone = |offset: f32, chroma: f32, lightness: f32| {
+        Oklch::new(lightness, chroma, hue(offset)).to_color32()
+    };
+    let l = if dark { 0.82 } else { 0.46 };
+    SyntaxColors {
+        text: s.on_surface,
+        keyword: tone(0.0, 0.15, l),
+        type_name: tone(52.0, 0.10, if dark { 0.84 } else { 0.44 }),
+        function: tone(310.0, 0.12, if dark { 0.85 } else { 0.45 }),
+        string: Oklch::new(if dark { 0.79 } else { 0.45 }, 0.12, 155.0).to_color32(),
+        number: Oklch::new(if dark { 0.83 } else { 0.47 }, 0.13, 75.0).to_color32(),
+        comment: if dark {
+            Color32::from_gray(138)
+        } else {
+            Color32::from_gray(118)
+        },
+        operator: s.on_surface_variant,
+        punctuation: s.on_surface_variant,
+        preprocessor: tone(20.0, 0.12, if dark { 0.80 } else { 0.45 }),
+        constant: tone(330.0, 0.14, if dark { 0.82 } else { 0.46 }),
+        attribute: Oklch::new(if dark { 0.82 } else { 0.47 }, 0.11, 95.0).to_color32(),
+        tag: tone(8.0, 0.14, if dark { 0.80 } else { 0.45 }),
+        heading: tone(0.0, 0.15, if dark { 0.87 } else { 0.42 }),
+        link: Oklch::new(if dark { 0.80 } else { 0.46 }, 0.13, 235.0).to_color32(),
+        invalid: s.error,
+    }
 }
 
 /// Seed palettes offered in preferences (Material You style colour choices).

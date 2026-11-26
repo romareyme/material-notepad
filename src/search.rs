@@ -103,6 +103,21 @@ impl Finder {
             None => Ok(text.to_owned()),
         }
     }
+
+    pub fn replace_match(
+        &mut self,
+        matched_slice: &str,
+        query: &str,
+        options: &SearchOptions,
+        replacement: &str,
+    ) -> Result<String, String> {
+        self.ensure(query, options);
+        match &self.compiled {
+            Some(Ok(regex)) if options.regex => Ok(regex.replace(matched_slice, replacement).into_owned()),
+            Some(Err(error)) => Err(error.clone()),
+            _ => Ok(replacement.to_owned()),
+        }
+    }
 }
 
 fn compile(query: &str, options: &SearchOptions) -> Result<Regex, String> {

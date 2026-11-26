@@ -884,17 +884,21 @@ fn generic(text: &str, spec: &Spec, spans: &mut Vec<Span>) {
         // Triple quoted strings (Python, Kotlin, Elixir).
         if spec.triple_quotes {
             let mut found = None;
-            for q in spec.quotes {
-                if text[i..].starts_with(&q.to_string().repeat(3)) {
-                    found = Some(*q);
-                    break;
+            for &q in spec.quotes {
+                if q.is_ascii() {
+                    let b = q as u8;
+                    if bytes[i..].starts_with(&[b, b, b]) {
+                        found = Some(b);
+                        break;
+                    }
                 }
             }
-            if let Some(q) = found {
+            if let Some(b) = found {
                 let start = i;
-                let delimiter = q.to_string().repeat(3);
+                let buf = [b; 3];
+                let delimiter = std::str::from_utf8(&buf).unwrap_or("\"\"\"");
                 i += delimiter.len();
-                if let Some(pos) = text[i..].find(&delimiter) {
+                if let Some(pos) = text[i..].find(delimiter) {
                     i += pos + delimiter.len();
                 } else {
                     i = len;
@@ -1290,7 +1294,7 @@ fn markup(text: &str, spans: &mut Vec<Span>) {
                     push(spans, astart, i, TokenKind::Attribute);
                     continue;
                 }
-                i += 1;
+                i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             }
             if i < len {
                 i += 1;
@@ -1305,7 +1309,7 @@ fn markup(text: &str, spans: &mut Vec<Span>) {
                 continue;
             }
         }
-        i += 1;
+        i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
     }
 }
 
@@ -1320,7 +1324,10 @@ fn json(text: &str, spans: &mut Vec<Span>) {
                 i += 1;
                 while i < len {
                     if bytes[i] == b'\\' {
-                        i += 2;
+                        i += 1;
+                        if i < len {
+                            i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                        }
                         continue;
                     }
                     if bytes[i] == b'"' {
@@ -1505,8 +1512,12 @@ fn css(text: &str, spec: &Spec, spans: &mut Vec<Span>) {
             while i < len && bytes[i] != quote {
                 if bytes[i] == b'\\' {
                     i += 1;
+                    if i < len {
+                        i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    }
+                    continue;
                 }
-                i += 1;
+                i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             }
             if i < len {
                 i += 1;
@@ -1581,7 +1592,7 @@ fn css(text: &str, spec: &Spec, spans: &mut Vec<Span>) {
             push(spans, start, i, TokenKind::Number);
             continue;
         }
-        i += 1;
+        i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
     }
 }
 
@@ -1743,5 +1754,17 @@ mod tests {
         let text = "use std::io;\n\nfn main() {\n    println!(\"Hi\");\n}\n";
         let tokens = kinds(text, Language::Rust);
         assert!(tokens.len() > 5);
+    }
+
+    #[test]
+    fn utf8_text_in_markup_css_json_does_not_panic() {
+        let html = "<div class=\"т\">Привет 🌍 <!-- коммент --></div>";
+        assert!(!highlight(html, Language::Html).is_empty());
+        let css_src = "/* привет */ .a { content: \"мир\"; color: #fff; } /* конец */";
+        assert!(!highlight(css_src, Language::Css).is_empty());
+        let json_src = "{\"ключ\": \"значение\\\n\"}";
+        assert!(!highlight(json_src, Language::Json).is_empty());
+        let py_src = "\"\"\"привет\"\"\" + '''мир'''";
+        assert!(!highlight(py_src, Language::Python).is_empty());
     }
 }

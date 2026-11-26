@@ -121,7 +121,14 @@ pub fn save_settings(settings: &Settings) -> io::Result<()> {
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes)?;
-    fs::rename(tmp, path)
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let result = fs::write(path, bytes);
+            let _ = fs::remove_file(&tmp);
+            result
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

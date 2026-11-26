@@ -204,6 +204,7 @@ pub struct Document {
     pub file_mtime: Option<SystemTime>,
     pub file_len: Option<u64>,
     pub external_change: bool,
+    pub backup_name: Option<String>,
     line_starts: Vec<usize>,
     line_char_starts: Vec<usize>,
     indexed_revision: u64,
@@ -238,6 +239,7 @@ impl Document {
             file_mtime: None,
             file_len: None,
             external_change: false,
+            backup_name: None,
             line_starts: vec![0],
             line_char_starts: vec![0],
             indexed_revision: 1,
@@ -267,8 +269,9 @@ impl Document {
         doc.text = text;
         doc.encoding = encoding;
         doc.eol = eol;
-        doc.file_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
-        doc.file_len = fs::metadata(path).map(|m| m.len()).ok();
+        let meta = fs::metadata(path).ok();
+        doc.file_mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        doc.file_len = meta.as_ref().map(|m| m.len());
         doc.revision = 1;
         doc.saved_revision = 1;
         doc.indexed_revision = 0;
@@ -439,8 +442,9 @@ impl Document {
         }
         self.saved_revision = self.revision;
         self.saved_at = Some(SystemTime::now());
-        self.file_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
-        self.file_len = fs::metadata(&path).map(|m| m.len()).ok();
+        let meta = fs::metadata(&path).ok();
+        self.file_mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        self.file_len = meta.as_ref().map(|m| m.len());
         self.external_change = false;
         Ok(())
     }
@@ -493,8 +497,9 @@ impl Document {
         self.revision += 1;
         self.saved_revision = self.revision;
         self.external_change = false;
-        self.file_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
-        self.file_len = fs::metadata(&path).map(|m| m.len()).ok();
+        let meta = fs::metadata(&path).ok();
+        self.file_mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        self.file_len = meta.as_ref().map(|m| m.len());
         self.indexed_revision = 0;
         self.ensure_index();
         Ok(())

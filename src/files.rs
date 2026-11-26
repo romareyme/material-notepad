@@ -112,8 +112,14 @@ pub fn find_in_files(
         let Ok(text) = std::str::from_utf8(&bytes) else {
             return;
         };
+        let mut line_no = 1usize;
+        let mut last_line_start = 0usize;
         for range in finder.matches(text, query, options) {
             let line_start = text[..range.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            if line_start > last_line_start {
+                line_no += text[last_line_start..line_start].matches('\n').count();
+                last_line_start = line_start;
+            }
             let line_end = text[range.start..]
                 .find('\n')
                 .map(|i| range.start + i)
@@ -122,7 +128,7 @@ pub fn find_in_files(
             let column = text[line_start..range.start].chars().count() + 1;
             hits.push(FileHit {
                 path: path.to_path_buf(),
-                line: text[..line_start].matches('\n').count() + 1,
+                line: line_no,
                 column,
                 line_text,
             });
@@ -138,11 +144,14 @@ fn walk(dir: &Path, depth: usize, visit: &mut dyn FnMut(&Path)) -> io::Result<()
     if depth > 12 {
         return Ok(());
     }
-    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_dir() {
             if matches!(
                 name.as_str(),
                 ".git"
@@ -157,14 +166,14 @@ fn walk(dir: &Path, depth: usize, visit: &mut dyn FnMut(&Path)) -> io::Result<()
             ) {
                 continue;
             }
-            entries.push(path);
-        } else if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            entries.push(path);
+            entries.push((path, true));
+        } else if ft.is_file() {
+            entries.push((path, false));
         }
     }
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, is_dir) in entries {
+        if is_dir {
             walk(&path, depth + 1, visit)?;
         } else {
             visit(&path);

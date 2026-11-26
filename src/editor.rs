@@ -301,7 +301,7 @@ pub fn show(
                         })
                 });
                 let selected = doc.selection.filter(|(start, end)| end > start);
-                if deleting {
+                if deleting && !event.changed {
                     if let Some((start, end)) = selected {
                         // The widget may already have deleted the text this
                         // frame, leaving these offsets past the end. Clamping
@@ -374,11 +374,15 @@ pub fn show(
             // alpha so glyphs stay readable, Material style.
             let painter = ui.painter_at(output.text_clip_rect);
             let origin = output.galley_pos;
+            let clip = output.text_clip_rect;
             if let Some(rect) = line_rect(&output.galley, origin, doc.cursor.line) {
                 painter.rect_filled(rect, 0.0, line_highlight);
             }
             for (index, range) in matches.iter().enumerate() {
                 if let Some(rect) = range_rect(doc, &output.galley, origin, range) {
+                    if !clip.intersects(rect.expand(2.0)) {
+                        continue;
+                    }
                     if Some(index) == current_match {
                         painter.rect_filled(rect.expand(1.0), 2.0, active_match_fill);
                         painter.rect_stroke(
@@ -431,10 +435,16 @@ fn paint_gutter(
         Stroke::new(1.0_f32, separator),
     );
     let font = FontId::new(font_size.max(9.0), egui::FontFamily::Monospace);
+    let clip = ui.clip_rect();
     let mut line_no = 1usize;
     let mut first_row = true;
     for row in &output.galley.rows {
-        if first_row {
+        let row_top = origin.y + row.rect.min.y;
+        let row_bottom = origin.y + row.rect.max.y;
+        if row_top > clip.bottom() {
+            break;
+        }
+        if first_row && row_bottom >= clip.top() {
             let y = origin.y + row.rect.center().y;
             let color = if line_no == doc.cursor.line {
                 active_fg
@@ -486,7 +496,13 @@ fn range_rect(
     }
     let a = galley.pos_from_ccursor(CCursor::new(start));
     let b = galley.pos_from_ccursor(CCursor::new(end));
-    let mut rect = Rect::from_min_max(a.min, b.max);
+    // If the match wraps onto another row, clamp to the first row instead of
+    // stretching a rectangle across the editor width.
+    let mut rect = if (a.min.y - b.min.y).abs() < 1.0 && b.max.x >= a.min.x {
+        Rect::from_min_max(a.min, b.max)
+    } else {
+        Rect::from_min_max(a.min, Pos2::new((a.min.x + 12.0).max(a.max.x), a.max.y))
+    };
     rect = rect.translate(origin.to_vec2());
     if rect.width() < 2.0 {
         rect.max.x = rect.min.x + 2.0;
@@ -597,10 +613,13 @@ fn indent_lines(
     } else {
         "\t".to_owned()
     };
-    let mut lines: Vec<String> = doc.text.split('\n').map(str::to_owned).collect();
-    let first = start_line.saturating_sub(1);
-    let last = end_line.min(lines.len());
-    for line in &mut lines[first..last] {
+    let block_start = doc.line_start(start_line);
+    let block_end = line_end_byte(doc, end_line);
+    let mut lines: Vec<String> = doc.text[block_start..block_end]
+        .split('\n')
+        .map(str::to_owned)
+        .collect();
+    for line in &mut lines {
         if outdent {
             let remove = line
                 .chars()
@@ -619,13 +638,11 @@ fn indent_lines(
             line.insert_str(0, &indent);
         }
     }
-    doc.text = lines.join("\n");
+    let replaced = lines.join("\n");
+    doc.text.replace_range(block_start..block_end, &replaced);
     doc.edited();
     let start = doc.line_start(start_line);
-    let end = doc.line_start(end_line)
-        + doc.text[doc.line_start(end_line)..]
-            .find('\n')
-            .unwrap_or(doc.text.len() - doc.line_start(end_line));
+    let end = line_end_byte(doc, end_line);
     doc.requested_selection = Some((start, end));
 }
 
@@ -704,13 +721,27 @@ pub fn toggle_comment(doc: &mut Document) {
         return;
     };
     let (start_line, end_line) = selected_lines(doc);
-    let mut lines: Vec<String> = doc.text.split('\n').map(str::to_owned).collect();
-    let first = start_line.saturating_sub(1);
-    let last = end_line.min(lines.len());
-    let all_commented = lines[first..last]
-        .iter()
-        .all(|line| line.trim_start().starts_with(prefix));
-    for line in &mut lines[first..last] {
+    let block_start = doc.line_start(start_line);
+    let block_end = line_end_byte(doc, end_line);
+    let mut lines: Vec<String> = doc.text[block_start..block_end]
+        .split('\n')
+        .map(str::to_owned)
+        .collect();
+    let has_non_empty = lines.iter().any(|line| !line.trim().is_empty());
+    let all_commented = if has_non_empty {
+        lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| line.trim_start().starts_with(prefix))
+    } else {
+        lines
+            .iter()
+            .all(|line| line.trim_start().starts_with(prefix))
+    };
+    for line in &mut lines {
+        if has_non_empty && line.trim().is_empty() {
+            continue;
+        }
         if all_commented {
             if let Some(pos) = line.find(prefix) {
                 let after = pos + prefix.len();
@@ -731,7 +762,8 @@ pub fn toggle_comment(doc: &mut Document) {
             line.insert_str(indent, &insert);
         }
     }
-    doc.text = lines.join("\n");
+    let replaced = lines.join("\n");
+    doc.text.replace_range(block_start..block_end, &replaced);
     doc.edited();
     let start = doc.line_start(start_line);
     let end = line_end_byte(doc, end_line);
@@ -771,9 +803,17 @@ pub fn move_line(doc: &mut Document, up: bool) {
         return;
     }
     let other = if up { line - 1 } else { line + 1 };
-    let mut lines: Vec<String> = doc.text.split('\n').map(str::to_owned).collect();
-    lines.swap(line - 1, other - 1);
-    doc.text = lines.join("\n");
+    let (first, second) = if up { (other, line) } else { (line, other) };
+    let first_start = doc.line_start(first);
+    let first_end = line_end_byte(doc, first);
+    let second_start = doc.line_start(second);
+    let second_end = line_end_byte(doc, second);
+    let swapped = format!(
+        "{}\n{}",
+        &doc.text[second_start..second_end],
+        &doc.text[first_start..first_end]
+    );
+    doc.text.replace_range(first_start..second_end, &swapped);
     doc.edited();
     let byte = doc.byte_of(other, doc.cursor.column);
     doc.requested_selection = Some((byte, byte));
