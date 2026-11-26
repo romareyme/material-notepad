@@ -189,6 +189,15 @@ pub struct CursorInfo {
     pub selection_chars: usize,
 }
 
+#[derive(Clone, Debug)]
+struct EditOp {
+    pos: usize,
+    old_text: String,
+    new_text: String,
+    cursor_before: usize,
+    cursor_after: usize,
+}
+
 pub struct Document {
     pub id: u64,
     pub path: Option<PathBuf>,
@@ -205,6 +214,7 @@ pub struct Document {
     pub file_len: Option<u64>,
     pub external_change: bool,
     pub backup_name: Option<String>,
+    pub pinned: bool,
     line_starts: Vec<usize>,
     line_char_starts: Vec<usize>,
     indexed_revision: u64,
@@ -216,6 +226,10 @@ pub struct Document {
     /// A selection set by a command (Ctrl+A) that the widget's own caret report
     /// must not overwrite until the user types or moves the caret.
     pub selection_sticky: bool,
+    /// Multi-cursor selections in sorted byte offsets. Empty when using single caret.
+    pub multi_cursors: Vec<(usize, usize)>,
+    undo_stack: Vec<EditOp>,
+    redo_stack: Vec<EditOp>,
 }
 
 impl Document {
@@ -240,6 +254,7 @@ impl Document {
             file_len: None,
             external_change: false,
             backup_name: None,
+            pinned: false,
             line_starts: vec![0],
             line_char_starts: vec![0],
             indexed_revision: 1,
@@ -247,6 +262,9 @@ impl Document {
             selection: None,
             requested_selection: None,
             selection_sticky: false,
+            multi_cursors: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
         doc.language = Language::detect(None, &doc.text, None);
         doc
@@ -518,6 +536,104 @@ impl Document {
         self.indexed_revision = 0;
         self.ensure_index();
     }
+
+    /// Record a diff between `before` and current `self.text` on the undo stack.
+    pub fn record_change(&mut self, before: &str, cursor_before: usize, cursor_after: usize) {
+        if before == self.text {
+            return;
+        }
+        let a = before.as_bytes();
+        let b = self.text.as_bytes();
+        let min_len = a.len().min(b.len());
+        let mut prefix = 0usize;
+        while prefix < min_len && a[prefix] == b[prefix] {
+            prefix += 1;
+        }
+        while prefix > 0 && (!before.is_char_boundary(prefix) || !self.text.is_char_boundary(prefix))
+        {
+            prefix -= 1;
+        }
+
+        let mut suffix = 0usize;
+        let max_suffix = (a.len() - prefix).min(b.len() - prefix);
+        while suffix < max_suffix && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix] {
+            suffix += 1;
+        }
+        while suffix > 0
+            && (!before.is_char_boundary(before.len() - suffix)
+                || !self.text.is_char_boundary(self.text.len() - suffix))
+        {
+            suffix -= 1;
+        }
+
+        let old_text = before[prefix..before.len() - suffix].to_owned();
+        let new_text = self.text[prefix..self.text.len() - suffix].to_owned();
+        self.redo_stack.clear();
+
+        // Coalesce consecutive single-character non-whitespace typing for ergonomic undo.
+        if let Some(last) = self.undo_stack.last_mut() {
+            let single_insert = old_text.is_empty()
+                && new_text.len() == 1
+                && last.old_text.is_empty()
+                && !last.new_text.is_empty()
+                && last.new_text.len() < 24
+                && !new_text.chars().all(char::is_whitespace)
+                && !last.new_text.chars().all(char::is_whitespace)
+                && last.pos + last.new_text.len() == prefix;
+            if single_insert {
+                last.new_text.push_str(&new_text);
+                last.cursor_after = cursor_after;
+                return;
+            }
+        }
+
+        self.undo_stack.push(EditOp {
+            pos: prefix,
+            old_text,
+            new_text,
+            cursor_before,
+            cursor_after,
+        });
+        if self.undo_stack.len() > 200 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(op) = self.undo_stack.pop() else {
+            return false;
+        };
+        let end = (op.pos + op.new_text.len()).min(self.text.len());
+        let pos = self.snap(op.pos);
+        let end = self.snap(end).max(pos);
+        self.text.replace_range(pos..end, &op.old_text);
+        self.edited();
+        self.multi_cursors.clear();
+        let caret = self.snap(op.cursor_before);
+        self.requested_selection = Some((caret, caret));
+        self.selection = Some((caret, caret));
+        self.update_cursor(caret, None);
+        self.redo_stack.push(op);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(op) = self.redo_stack.pop() else {
+            return false;
+        };
+        let end = (op.pos + op.old_text.len()).min(self.text.len());
+        let pos = self.snap(op.pos);
+        let end = self.snap(end).max(pos);
+        self.text.replace_range(pos..end, &op.new_text);
+        self.edited();
+        self.multi_cursors.clear();
+        let caret = self.snap(op.cursor_after);
+        self.requested_selection = Some((caret, caret));
+        self.selection = Some((caret, caret));
+        self.update_cursor(caret, None);
+        self.undo_stack.push(op);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -608,5 +724,20 @@ mod tests {
         doc.edited();
         assert_eq!(doc.line_count(), 3);
         assert_eq!(doc.line_col(5), (2, 1));
+    }
+
+    #[test]
+    fn undo_and_redo_round_trip() {
+        let mut doc = Document::untitled(1, 1);
+        doc.set_text("hello".to_owned());
+        let before = doc.text.clone();
+        doc.text.push_str(" world");
+        doc.edited();
+        doc.record_change(&before, 5, 11);
+        assert_eq!(doc.text, "hello world");
+        assert!(doc.undo());
+        assert_eq!(doc.text, "hello");
+        assert!(doc.redo());
+        assert_eq!(doc.text, "hello world");
     }
 }

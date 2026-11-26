@@ -356,15 +356,18 @@ pub fn tab_compact(
     title: &str,
     dirty: bool,
     active: bool,
+    pinned: bool,
     closable: bool,
 ) -> TabResponse {
     let s = &theme.scheme;
     let font = theme.type_scale.label_large.clone();
-    let close_w = if closable { 20.0 } else { 0.0 };
+    let show_close = closable && !pinned;
+    let pin_w = if pinned { 16.0 } else { 0.0 };
+    let close_w = if show_close { 20.0 } else { 0.0 };
     // The tab has a hard maximum width, so the title is laid out into the space
     // that is actually left and elided; painting the full-length galley made long
     // names run past the tab background.
-    let max_text: f32 = 200.0 - 22.0 - close_w;
+    let max_text: f32 = 200.0 - 22.0 - close_w - pin_w;
     let galley = ui.fonts(|f| {
         let mut job = egui::text::LayoutJob::simple_singleline(
             title.to_owned(),
@@ -379,8 +382,8 @@ pub fn tab_compact(
         };
         f.layout_job(job)
     });
-    let width = (galley.size().x + 22.0 + close_w).min(200.0);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
+    let width = (galley.size().x + 22.0 + close_w + pin_w).min(200.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click_and_drag());
     let mut close_clicked = false;
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -399,8 +402,20 @@ pub fn tab_compact(
         } else {
             s.on_surface_variant
         };
+        let mut text_x = rect.left() + 10.0;
+        if pinned {
+            let g = ui.fonts(|f| {
+                f.layout_no_wrap(crate::icons::PIN.to_string(), icon_font(12.0), s.primary)
+            });
+            painter.galley(
+                egui::pos2(text_x, rect.center().y - g.size().y / 2.0),
+                g,
+                s.primary,
+            );
+            text_x += pin_w;
+        }
         painter.galley(
-            egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+            egui::pos2(text_x, rect.center().y - galley.size().y / 2.0),
             galley.clone(),
             fg,
         );
@@ -412,7 +427,7 @@ pub fn tab_compact(
             painter.rect_filled(underline, 1.0, s.primary);
         }
         let close_center = egui::pos2(rect.right() - 12.0, rect.center().y);
-        if closable {
+        if show_close {
             let hovered = ui
                 .ctx()
                 .pointer_hover_pos()

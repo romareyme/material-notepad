@@ -25,7 +25,7 @@ HEADER = r'''; Material Notepad installer (Inno Setup 6).
 ; entries are written per user, so a per-user install needs no elevation.
 
 #define AppName "Material Notepad"
-#define AppVersion "1.0.2"
+#define AppVersion "1.1.0"
 #define AppPublisher "Material Notepad"
 #define AppExeName "material-notepad.exe"
 #define AppId "{{FE899CAE-0B69-4120-8FB3-28A656A47897}"
@@ -73,12 +73,15 @@ russian.StartMenuTask=Создать иконку в меню «Пуск»
 english.StartMenuTask=Create a Start Menu shortcut
 russian.FileIconsTask=Назначить иконки Material Notepad текстовым файлам (txt, cfg, json и другим)
 english.FileIconsTask=Use the Material Notepad document icons for text files (txt, cfg, json and others)
+russian.ContextMenuTask=Добавить «Открыть в Material Notepad» в контекстное меню Проводника
+english.ContextMenuTask=Add "Open with Material Notepad" to Explorer context menu
 russian.LaunchApp=Запустить Material Notepad
 english.LaunchApp=Launch Material Notepad
 
 [Tasks]
 Name: "startmenu"; Description: "{cm:StartMenuTask}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 Name: "fileicons"; Description: "{cm:FileIconsTask}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
+Name: "contextmenu"; Description: "{cm:ContextMenuTask}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "..\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -97,6 +100,13 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}"; ValueType: str
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"",0"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".txt"; ValueData: ""; Flags: uninsdeletekey
+; Optional Explorer context menu entry for files and folders (per-user).
+Root: HKA; Subkey: "Software\Classes\*\shell\MaterialNotepad"; ValueType: string; ValueName: ""; ValueData: "Открыть в Material Notepad"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\*\shell\MaterialNotepad"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExeName}"",0"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\*\shell\MaterialNotepad\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\MaterialNotepad"; ValueType: string; ValueName: ""; ValueData: "Открыть папку в Material Notepad"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\MaterialNotepad"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExeName}"",0"; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\MaterialNotepad\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Tasks: contextmenu; Flags: uninsdeletekey
 
 '''
 

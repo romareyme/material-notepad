@@ -66,6 +66,7 @@ pub enum Language {
     Protobuf,
     Vue,
     Svelte,
+    Csv,
     Log,
 }
 
@@ -125,6 +126,7 @@ enum Special {
     IniLike,
     Yaml,
     Diff,
+    Csv,
 }
 
 struct Spec {
@@ -144,7 +146,7 @@ struct Spec {
 const NO_KEYWORDS: &[&str] = &[];
 
 impl Language {
-    pub const ALL: [Language; 54] = [
+    pub const ALL: [Language; 55] = [
         Language::PlainText,
         Language::C,
         Language::Cpp,
@@ -198,6 +200,7 @@ impl Language {
         Language::Protobuf,
         Language::Vue,
         Language::Svelte,
+        Language::Csv,
         Language::Log,
     ];
 
@@ -256,6 +259,7 @@ impl Language {
             Language::Protobuf => "Protocol Buffers",
             Language::Vue => "Vue",
             Language::Svelte => "Svelte",
+            Language::Csv => "CSV",
             Language::Log => "Log",
         }
     }
@@ -328,6 +332,7 @@ impl Language {
                 "proto" => Language::Protobuf,
                 "vue" => Language::Vue,
                 "svelte" => Language::Svelte,
+                "csv" | "tsv" => Language::Csv,
                 "log" => Language::Log,
                 _ => Language::PlainText,
             };
@@ -767,6 +772,10 @@ impl Language {
                 quotes: &['"', '\''],
                 ..plain
             },
+            Language::Csv => Spec {
+                special: Special::Csv,
+                ..plain
+            },
         }
     }
 }
@@ -784,6 +793,7 @@ pub fn highlight(text: &str, language: Language) -> Vec<Span> {
         Special::IniLike => ini_like(text, &mut spans),
         Special::Yaml => yaml(text, &mut spans),
         Special::Diff => diff(text, &mut spans),
+        Special::Csv => rainbow_csv(text, &mut spans),
         Special::None => {
             if language == Language::Css || language == Language::Scss {
                 css(text, &spec, &mut spans);
@@ -1490,6 +1500,63 @@ fn diff(text: &str, spans: &mut Vec<Span>) {
             push(spans, offset, offset + content.len(), TokenKind::Comment);
         }
         offset += line.len();
+    }
+}
+
+fn rainbow_csv(text: &str, spans: &mut Vec<Span>) {
+    let kinds = [
+        TokenKind::Keyword,
+        TokenKind::String,
+        TokenKind::Number,
+        TokenKind::Function,
+        TokenKind::Type,
+        TokenKind::Constant,
+        TokenKind::Attribute,
+    ];
+    let delimiter = crate::transform::detect_csv_delimiter(text) as u8;
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut col = 0usize;
+    let mut field_start = 0usize;
+    let mut in_quotes = false;
+
+    while i < len {
+        let b = bytes[i];
+        if in_quotes {
+            if b == b'"' {
+                if i + 1 < len && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_quotes = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' && i == field_start {
+            in_quotes = true;
+            i += 1;
+            continue;
+        }
+        if b == delimiter || b == b'\n' {
+            if i > field_start {
+                push(spans, field_start, i, kinds[col % kinds.len()]);
+            }
+            if b == delimiter {
+                push(spans, i, i + 1, TokenKind::Punctuation);
+                col += 1;
+            } else {
+                col = 0;
+            }
+            i += 1;
+            field_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if len > field_start {
+        push(spans, field_start, len, kinds[col % kinds.len()]);
     }
 }
 

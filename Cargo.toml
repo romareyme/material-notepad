@@ -1,6 +1,6 @@
 [package]
 name = "material-notepad"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 description = "Material Notepad: a Rust text editor with a Material You interface, forked from Notepad Next"
 license = "GPL-3.0-or-later"

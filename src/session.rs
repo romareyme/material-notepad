@@ -21,6 +21,7 @@ pub const APP_NAME: &str = "MaterialNotepad";
 pub struct Settings {
     pub dark_mode: bool,
     pub seed: [u8; 3],
+    pub use_system_accent: bool,
     pub ui_scale: f32,
     pub editor_font_size: f32,
     pub tab_width: usize,
@@ -28,6 +29,8 @@ pub struct Settings {
     pub word_wrap: bool,
     pub line_numbers: bool,
     pub restore_session: bool,
+    pub auto_save: bool,
+    pub always_on_top: bool,
     pub recent: Vec<String>,
     pub last_folder: Option<String>,
 }
@@ -37,6 +40,7 @@ impl Default for Settings {
         Self {
             dark_mode: true,
             seed: [SEEDS[0].1.r(), SEEDS[0].1.g(), SEEDS[0].1.b()],
+            use_system_accent: false,
             ui_scale: 1.0,
             editor_font_size: 14.0,
             tab_width: 4,
@@ -44,6 +48,8 @@ impl Default for Settings {
             word_wrap: false,
             line_numbers: true,
             restore_session: true,
+            auto_save: false,
+            always_on_top: false,
             recent: Vec::new(),
             last_folder: None,
         }
@@ -53,6 +59,15 @@ impl Default for Settings {
 impl Settings {
     pub fn seed_color(&self) -> Color32 {
         Color32::from_rgb(self.seed[0], self.seed[1], self.seed[2])
+    }
+
+    pub fn effective_seed_color(&self, system_accent: Option<[u8; 3]>) -> Color32 {
+        if self.use_system_accent {
+            if let Some([r, g, b]) = system_accent {
+                return Color32::from_rgb(r, g, b);
+            }
+        }
+        self.seed_color()
     }
 
     pub fn sanitize(&mut self) {
@@ -139,6 +154,51 @@ pub struct SessionFile {
     pub column: usize,
     pub encoding: Encoding,
     pub eol: Eol,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// Read the current Windows DWM accent colour from `HKCU\Software\Microsoft\Windows\DWM`.
+pub fn read_windows_accent_color() -> Option<[u8; 3]> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        for (value_name, is_abgr) in [("AccentColor", true), ("ColorizationColor", false)] {
+            let Ok(output) = std::process::Command::new("reg")
+                .args(["query", r"HKCU\Software\Microsoft\Windows\DWM", "/v", value_name])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for token in stdout.split_whitespace() {
+                if let Some(hex) = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X")) {
+                    if let Ok(val) = u32::from_str_radix(hex, 16) {
+                        let [r, g, b] = if is_abgr {
+                            [
+                                (val & 0xFF) as u8,
+                                ((val >> 8) & 0xFF) as u8,
+                                ((val >> 16) & 0xFF) as u8,
+                            ]
+                        } else {
+                            [
+                                ((val >> 16) & 0xFF) as u8,
+                                ((val >> 8) & 0xFF) as u8,
+                                (val & 0xFF) as u8,
+                            ]
+                        };
+                        return Some([r, g, b]);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

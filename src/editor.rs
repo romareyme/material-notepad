@@ -175,10 +175,42 @@ pub fn show(
     let apply_selection = |ui: &Ui, doc: &mut Document| apply_requested_selection(ui, id, doc);
     let mut selection_requested = apply_selection(ui, doc);
 
+    let mut event = EditorEvent::default();
+
+    if !doc.multi_cursors.is_empty() {
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            doc.multi_cursors.clear();
+        } else if handle_multi_cursor_input(ui, doc) {
+            event.changed = true;
+            selection_requested = true;
+        }
+    }
+
     // Editor shortcuts apply to the active document whether or not the widget
     // currently owns keyboard focus (a menu or dialog can take it).
     handle_keys(ui, doc, prefs);
     selection_requested |= apply_selection(ui, doc);
+
+    let may_edit_text = ui.input(|i| {
+        i.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Cut
+                    | egui::Event::Key {
+                        key: Key::Backspace | Key::Delete,
+                        pressed: true,
+                        ..
+                    }
+            )
+        })
+    });
+    let undo_snapshot = if may_edit_text {
+        Some((doc.text.clone(), caret_byte(doc)))
+    } else {
+        None
+    };
 
     let spans = cache.spans(doc);
     let background = theme.scheme.surface_container_lowest;
@@ -206,7 +238,6 @@ pub fn show(
     );
     let word_wrap = prefs.word_wrap;
 
-    let mut event = EditorEvent::default();
     let mut scroll_to_line = doc.scroll_to_line.take();
     let viewport_rows = ((ui.available_height() / theme.editor_line_height).ceil() as usize).max(6);
 
@@ -266,6 +297,13 @@ pub fn show(
             if output.response.changed() {
                 doc.edited();
                 event.changed = true;
+                if let Some((before, c_before)) = &undo_snapshot {
+                    let c_after = output
+                        .cursor_range
+                        .map(|r| doc.byte_index(r.primary.ccursor.index))
+                        .unwrap_or_else(|| caret_byte(doc));
+                    doc.record_change(before, *c_before, c_after);
+                }
             }
 
             if let Some(range) = output.cursor_range {
@@ -273,6 +311,19 @@ pub fn show(
                 let secondary = range.secondary.ccursor.index;
                 let a = doc.byte_index(primary);
                 let b = doc.byte_index(secondary);
+                // Alt+Click adds another cursor to multi_cursors.
+                if output.response.clicked() && ui.input(|i| i.modifiers.alt) {
+                    if doc.multi_cursors.is_empty() {
+                        let prev = doc.selection.unwrap_or((a, a));
+                        doc.multi_cursors.push(prev);
+                    }
+                    if !doc.multi_cursors.contains(&(a, a)) {
+                        doc.multi_cursors.push((a, a));
+                        doc.multi_cursors.sort_by_key(|&(s, _)| s);
+                    }
+                } else if output.response.clicked() && !ui.input(|i| i.modifiers.alt) {
+                    doc.multi_cursors.clear();
+                }
                 // A selection this frame set by a command wins over the widget's
                 // report for one frame, which still shows the previous caret.
                 // A sticky selection from Ctrl+A keeps winning until the user
@@ -309,8 +360,10 @@ pub fn show(
                         let start = doc.snap(start);
                         let end = doc.snap(end).max(start);
                         if end > start {
+                            let before = doc.text.clone();
                             doc.text.replace_range(start..end, "");
                             doc.edited();
+                            doc.record_change(&before, end, start);
                             event.changed = true;
                             doc.selection = Some((start, start));
                             doc.requested_selection = Some((start, start));
@@ -370,14 +423,42 @@ pub fn show(
                 );
             }
 
-            // Current line + find matches are painted after the text with a low
-            // alpha so glyphs stay readable, Material style.
+            // Current line + indent guides + brackets + HEX swatches + find matches + multi-cursors.
             let painter = ui.painter_at(output.text_clip_rect);
             let origin = output.galley_pos;
             let clip = output.text_clip_rect;
             if let Some(rect) = line_rect(&output.galley, origin, doc.cursor.line) {
                 painter.rect_filled(rect, 0.0, line_highlight);
             }
+            paint_indent_guides(
+                &painter,
+                &output.galley,
+                origin,
+                clip,
+                doc,
+                prefs.tab_width,
+                digit_width,
+                theme.scheme.outline_variant,
+            );
+            if let Some((open_b, close_b)) = matching_bracket(&doc.text, caret_byte(doc)) {
+                let bracket_bg = Color32::from_rgba_unmultiplied(
+                    theme.scheme.secondary.r(),
+                    theme.scheme.secondary.g(),
+                    theme.scheme.secondary.b(),
+                    55,
+                );
+                for pos in [open_b, close_b] {
+                    if let Some(rect) = range_rect(doc, &output.galley, origin, &(pos..pos + 1)) {
+                        painter.rect_filled(rect, 2.0, bracket_bg);
+                        painter.rect_stroke(
+                            rect,
+                            2.0,
+                            Stroke::new(1.0_f32, theme.scheme.primary),
+                        );
+                    }
+                }
+            }
+            paint_hex_swatches(&painter, doc, &output.galley, origin, clip);
             for (index, range) in matches.iter().enumerate() {
                 if let Some(rect) = range_rect(doc, &output.galley, origin, range) {
                     if !clip.intersects(rect.expand(2.0)) {
@@ -394,6 +475,9 @@ pub fn show(
                         painter.rect_filled(rect, 2.0, match_fill);
                     }
                 }
+            }
+            if !doc.multi_cursors.is_empty() {
+                paint_multi_cursors(&painter, doc, &output.galley, origin, theme);
             }
 
             if let Some(line) = scroll_to_line.take() {
@@ -573,16 +657,16 @@ fn caret_byte(doc: &Document) -> usize {
 
 /// Replace the selection (or insert at the caret) and place the caret after it.
 fn replace_selection(doc: &mut Document, text: &str) -> usize {
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let (start, end) = match doc.selection {
         Some((a, b)) => (a.min(b).min(doc.text.len()), a.max(b).min(doc.text.len())),
-        None => {
-            let caret = caret_byte(doc);
-            (caret, caret)
-        }
+        None => (cursor_before, cursor_before),
     };
     doc.text.replace_range(start..end, text);
     doc.edited();
     let caret = start + text.len();
+    doc.record_change(&before, cursor_before, caret);
     doc.requested_selection = Some((caret, caret));
     doc.selection = Some((caret, caret));
     caret
@@ -638,11 +722,14 @@ fn indent_lines(
             line.insert_str(0, &indent);
         }
     }
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let replaced = lines.join("\n");
     doc.text.replace_range(block_start..block_end, &replaced);
     doc.edited();
     let start = doc.line_start(start_line);
     let end = line_end_byte(doc, end_line);
+    doc.record_change(&before, cursor_before, end);
     doc.requested_selection = Some((start, end));
 }
 
@@ -657,6 +744,8 @@ fn outdent_line(doc: &mut Document, line: usize, prefs: &EditorPrefs) {
     if remove == 0 {
         return;
     }
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let cut = text
         .char_indices()
         .nth(remove)
@@ -666,6 +755,7 @@ fn outdent_line(doc: &mut Document, line: usize, prefs: &EditorPrefs) {
     doc.text.replace_range(range.start..range.start + cut, "");
     doc.edited();
     let byte = doc.byte_of(line, column);
+    doc.record_change(&before, cursor_before, byte);
     doc.requested_selection = Some((byte, byte));
 }
 
@@ -762,16 +852,21 @@ pub fn toggle_comment(doc: &mut Document) {
             line.insert_str(indent, &insert);
         }
     }
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let replaced = lines.join("\n");
     doc.text.replace_range(block_start..block_end, &replaced);
     doc.edited();
     let start = doc.line_start(start_line);
     let end = line_end_byte(doc, end_line);
+    doc.record_change(&before, cursor_before, end);
     doc.requested_selection = Some((start, end));
 }
 
 /// Duplicate the current line (Ctrl+D).
 pub fn duplicate_line(doc: &mut Document) {
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let line = doc.cursor.line.clamp(1, doc.line_count());
     let range = doc.line_range(line);
     let mut content = doc.text[range.clone()].to_owned();
@@ -782,17 +877,21 @@ pub fn duplicate_line(doc: &mut Document) {
     doc.text.insert_str(insert_at, &content);
     doc.edited();
     let byte = doc.byte_of((line + 1).min(doc.line_count()), doc.cursor.column);
+    doc.record_change(&before, cursor_before, byte);
     doc.requested_selection = Some((byte, byte));
 }
 
 /// Delete the current line (Ctrl+Shift+K).
 pub fn delete_line(doc: &mut Document) {
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let line = doc.cursor.line.clamp(1, doc.line_count());
     let range = doc.line_range(line);
     doc.text.replace_range(range.clone(), "");
     doc.edited();
     let target = line.min(doc.line_count());
     let byte = doc.byte_of(target, 1);
+    doc.record_change(&before, cursor_before, byte);
     doc.requested_selection = Some((byte, byte));
 }
 
@@ -802,6 +901,8 @@ pub fn move_line(doc: &mut Document, up: bool) {
     if (up && line <= 1) || (!up && line >= doc.line_count()) {
         return;
     }
+    let before = doc.text.clone();
+    let cursor_before = caret_byte(doc);
     let other = if up { line - 1 } else { line + 1 };
     let (first, second) = if up { (other, line) } else { (line, other) };
     let first_start = doc.line_start(first);
@@ -816,6 +917,7 @@ pub fn move_line(doc: &mut Document, up: bool) {
     doc.text.replace_range(first_start..second_end, &swapped);
     doc.edited();
     let byte = doc.byte_of(other, doc.cursor.column);
+    doc.record_change(&before, cursor_before, byte);
     doc.requested_selection = Some((byte, byte));
     doc.scroll_to_line = Some(other);
 }
@@ -854,10 +956,426 @@ pub fn goto_line(doc: &mut Document, line: usize) {
 /// Select the whole document (Ctrl+A and the menu entry).
 pub fn select_all(doc: &mut Document) {
     let len = doc.text.len();
+    doc.multi_cursors.clear();
     doc.selection = Some((0, len));
     doc.requested_selection = Some((0, len));
     doc.selection_sticky = true;
     doc.update_cursor(len, Some((0, len)));
+}
+
+/// Select all occurrences of the current selection (or word at caret) as multi-cursors.
+pub fn select_all_occurrences(doc: &mut Document) -> usize {
+    let needle = match doc.selection {
+        Some((a, b)) if b > a => doc.text[doc.snap(a)..doc.snap(b)].to_owned(),
+        _ => word_at(doc, caret_byte(doc)),
+    };
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut ranges = Vec::new();
+    let mut pos = 0usize;
+    while let Some(found) = doc.text[pos..].find(&needle) {
+        let start = pos + found;
+        let end = start + needle.len();
+        ranges.push((start, end));
+        pos = end;
+        if ranges.len() >= 500 {
+            break;
+        }
+    }
+    if ranges.len() > 1 {
+        doc.multi_cursors = ranges;
+        doc.multi_cursors.len()
+    } else {
+        if let Some((s, e)) = ranges.first().copied() {
+            doc.requested_selection = Some((s, e));
+            doc.selection = Some((s, e));
+        }
+        ranges.len()
+    }
+}
+
+/// Add another cursor on the line above or below at the same column.
+pub fn add_cursor_vertical(doc: &mut Document, down: bool) {
+    if doc.multi_cursors.is_empty() {
+        let pos = caret_byte(doc);
+        doc.multi_cursors.push((pos, pos));
+    }
+    let anchor = if down {
+        doc.multi_cursors.last().map(|&(_, b)| b).unwrap_or(0)
+    } else {
+        doc.multi_cursors.first().map(|&(a, _)| a).unwrap_or(0)
+    };
+    let (line, col) = doc.line_col(anchor);
+    let target = if down {
+        (line + 1).min(doc.line_count())
+    } else {
+        line.saturating_sub(1).max(1)
+    };
+    if target == line {
+        return;
+    }
+    let byte = doc.byte_of(target, col);
+    if !doc.multi_cursors.contains(&(byte, byte)) {
+        doc.multi_cursors.push((byte, byte));
+        doc.multi_cursors.sort_by_key(|&(s, _)| s);
+    }
+}
+
+fn word_at(doc: &Document, byte: usize) -> String {
+    let byte = doc.snap(byte);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut start = byte;
+    for (i, ch) in doc.text[..byte].char_indices().rev() {
+        if is_word(ch) {
+            start = i;
+        } else {
+            break;
+        }
+    }
+    let mut end = byte;
+    for (i, ch) in doc.text[byte..].char_indices() {
+        if is_word(ch) {
+            end = byte + i + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    doc.text[start..end].to_owned()
+}
+
+fn handle_multi_cursor_input(ui: &mut Ui, doc: &mut Document) -> bool {
+    enum Op {
+        Insert(String),
+        Backspace,
+        Delete,
+    }
+    let mut op: Option<Op> = None;
+    ui.input_mut(|i| {
+        if i.consume_key(Modifiers::NONE, Key::Backspace) {
+            op = Some(Op::Backspace);
+        } else if i.consume_key(Modifiers::NONE, Key::Delete) {
+            op = Some(Op::Delete);
+        } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+            op = Some(Op::Insert("\n".to_owned()));
+        } else {
+            let mut text_buf = String::new();
+            i.events.retain(|ev| {
+                if let egui::Event::Text(t) = ev {
+                    if !t.is_empty() {
+                        text_buf.push_str(t);
+                        return false;
+                    }
+                }
+                true
+            });
+            if !text_buf.is_empty() {
+                op = Some(Op::Insert(text_buf));
+            }
+        }
+    });
+
+    let Some(op) = op else {
+        return false;
+    };
+
+    let before = doc.text.clone();
+    let cursor_before = doc.multi_cursors.first().map(|c| c.0).unwrap_or(0);
+    let mut cursors = std::mem::take(&mut doc.multi_cursors);
+    cursors.sort_by_key(|&(a, _)| a);
+
+    // Apply edits from the back so earlier byte offsets stay valid, then shift
+    // cumulative deltas for the updated cursor positions.
+    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(cursors.len());
+    for &(raw_a, raw_b) in &cursors {
+        let a = doc.snap(raw_a.min(raw_b));
+        let b = doc.snap(raw_a.max(raw_b));
+        match &op {
+            Op::Insert(s) => edits.push((a, b, s.clone())),
+            Op::Backspace => {
+                if b > a {
+                    edits.push((a, b, String::new()));
+                } else if a > 0 {
+                    let prev = doc.text[..a]
+                        .char_indices()
+                        .next_back()
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    edits.push((prev, a, String::new()));
+                } else {
+                    edits.push((0, 0, String::new()));
+                }
+            }
+            Op::Delete => {
+                if b > a {
+                    edits.push((a, b, String::new()));
+                } else if b < doc.text.len() {
+                    let next = doc.text[b..]
+                        .chars()
+                        .next()
+                        .map(|c| b + c.len_utf8())
+                        .unwrap_or(b);
+                    edits.push((b, next, String::new()));
+                } else {
+                    edits.push((b, b, String::new()));
+                }
+            }
+        }
+    }
+
+    for (start, end, rep) in edits.iter().rev() {
+        doc.text.replace_range(*start..*end, rep);
+    }
+
+    let mut delta: isize = 0;
+    let mut updated = Vec::with_capacity(edits.len());
+    for (start, end, rep) in edits {
+        let new_pos = ((start as isize) + delta + rep.len() as isize).max(0) as usize;
+        delta += rep.len() as isize - (end - start) as isize;
+        let snapped = doc.snap(new_pos);
+        updated.push((snapped, snapped));
+    }
+    doc.multi_cursors = updated;
+    doc.edited();
+    let first = doc.multi_cursors.first().map(|c| c.0).unwrap_or(0);
+    doc.record_change(&before, cursor_before, first);
+    doc.requested_selection = Some((first, first));
+    doc.selection = Some((first, first));
+    doc.update_cursor(first, None);
+    true
+}
+
+fn paint_multi_cursors(
+    painter: &egui::Painter,
+    doc: &Document,
+    galley: &egui::Galley,
+    origin: Pos2,
+    theme: &Theme,
+) {
+    let sel_fill = Color32::from_rgba_unmultiplied(
+        theme.scheme.primary.r(),
+        theme.scheme.primary.g(),
+        theme.scheme.primary.b(),
+        70,
+    );
+    for &(a, b) in &doc.multi_cursors {
+        let a = doc.snap(a);
+        let b = doc.snap(b);
+        if b > a {
+            if let Some(rect) = range_rect(doc, galley, origin, &(a..b)) {
+                painter.rect_filled(rect, 2.0, sel_fill);
+            }
+        }
+        let caret_pos = galley
+            .pos_from_ccursor(CCursor::new(doc.char_index(b)))
+            .translate(origin.to_vec2());
+        painter.line_segment(
+            [
+                Pos2::new(caret_pos.min.x, caret_pos.min.y),
+                Pos2::new(caret_pos.min.x, caret_pos.max.y),
+            ],
+            Stroke::new(2.0_f32, theme.scheme.primary),
+        );
+    }
+}
+
+/// Find the matching `()`, `[]`, or `{}` partner for a bracket at or just before `byte`.
+pub fn matching_bracket(text: &str, byte: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let probe = |pos: usize| -> Option<(usize, u8, u8, bool)> {
+        let b = *bytes.get(pos)?;
+        match b {
+            b'(' => Some((pos, b'(', b')', true)),
+            b'[' => Some((pos, b'[', b']', true)),
+            b'{' => Some((pos, b'{', b'}', true)),
+            b')' => Some((pos, b')', b'(', false)),
+            b']' => Some((pos, b']', b'[', false)),
+            b'}' => Some((pos, b'}', b'{', false)),
+            _ => None,
+        }
+    };
+    let (pos, open, close, forward) = probe(byte).or_else(|| {
+        byte.checked_sub(1).and_then(probe)
+    })?;
+
+    const MAX_SCAN: usize = 64 * 1024;
+    let mut depth = 0usize;
+    if forward {
+        let limit = (pos + MAX_SCAN).min(bytes.len());
+        for (i, &b) in bytes[pos..limit].iter().enumerate() {
+            if b == open {
+                depth += 1;
+            } else if b == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((pos, pos + i));
+                }
+            }
+        }
+    } else {
+        let start = pos.saturating_sub(MAX_SCAN);
+        for i in (start..=pos).rev() {
+            let b = bytes[i];
+            if b == open {
+                depth += 1;
+            } else if b == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((i, pos));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_indent_guides(
+    painter: &egui::Painter,
+    galley: &egui::Galley,
+    origin: Pos2,
+    clip: Rect,
+    doc: &Document,
+    tab_width: usize,
+    char_width: f32,
+    color: Color32,
+) {
+    let step = tab_width.max(1);
+    let guide_color = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70);
+    let mut line_no = 1usize;
+    let mut first_row = true;
+    for row in &galley.rows {
+        let row_top = origin.y + row.rect.min.y;
+        let row_bottom = origin.y + row.rect.max.y;
+        if row_top > clip.bottom() {
+            break;
+        }
+        if first_row && row_bottom >= clip.top() {
+            let range = doc.line_range(line_no);
+            let mut cols = 0usize;
+            for b in doc.text[range].bytes() {
+                match b {
+                    b' ' => cols += 1,
+                    b'\t' => cols += step,
+                    _ => break,
+                }
+            }
+            let mut k = step;
+            while k <= cols {
+                let x = origin.x + k as f32 * char_width;
+                painter.line_segment(
+                    [Pos2::new(x, row_top), Pos2::new(x, row_bottom)],
+                    Stroke::new(1.0_f32, guide_color),
+                );
+                k += step;
+            }
+        }
+        first_row = row.ends_with_newline;
+        if row.ends_with_newline {
+            line_no += 1;
+        }
+    }
+}
+
+fn paint_hex_swatches(
+    painter: &egui::Painter,
+    doc: &Document,
+    galley: &egui::Galley,
+    origin: Pos2,
+    clip: Rect,
+) {
+    // Only scan the lines currently visible in the viewport.
+    let mut first_visible = None;
+    let mut last_visible = 1usize;
+    let mut line_no = 1usize;
+    let mut first_row = true;
+    for row in &galley.rows {
+        let row_top = origin.y + row.rect.min.y;
+        let row_bottom = origin.y + row.rect.max.y;
+        if row_top > clip.bottom() {
+            break;
+        }
+        if first_row && row_bottom >= clip.top() {
+            if first_visible.is_none() {
+                first_visible = Some(line_no);
+            }
+            last_visible = line_no;
+        }
+        first_row = row.ends_with_newline;
+        if row.ends_with_newline {
+            line_no += 1;
+        }
+    }
+    let Some(start_line) = first_visible else {
+        return;
+    };
+
+    for line in start_line..=last_visible {
+        let range = doc.line_range(line);
+        let bytes = doc.text[range.clone()].as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'#' {
+                let hex_start = i + 1;
+                let mut hex_end = hex_start;
+                while hex_end < bytes.len() && bytes[hex_end].is_ascii_hexdigit() {
+                    hex_end += 1;
+                }
+                let hex_len = hex_end - hex_start;
+                let next_ok = bytes
+                    .get(hex_end)
+                    .map(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+                    .unwrap_or(true);
+                if next_ok && matches!(hex_len, 3 | 6 | 8) {
+                    if let Some(color) = parse_hex_color(&bytes[hex_start..hex_end]) {
+                        let abs = (range.start + i)..(range.start + hex_end);
+                        if let Some(rect) = range_rect(doc, galley, origin, &abs) {
+                            let bar = Rect::from_min_max(
+                                Pos2::new(rect.left(), rect.bottom() - 2.5),
+                                Pos2::new(rect.right(), rect.bottom()),
+                            );
+                            painter.rect_filled(bar, 1.0, color);
+                        }
+                    }
+                }
+                i = hex_end.max(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+fn parse_hex_color(hex: &[u8]) -> Option<Color32> {
+    let val = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    let byte2 = |hi: u8, lo: u8| Some(val(hi)? * 16 + val(lo)?);
+    match hex.len() {
+        3 => {
+            let r = val(hex[0])? * 17;
+            let g = val(hex[1])? * 17;
+            let b = val(hex[2])? * 17;
+            Some(Color32::from_rgb(r, g, b))
+        }
+        6 => Some(Color32::from_rgb(
+            byte2(hex[0], hex[1])?,
+            byte2(hex[2], hex[3])?,
+            byte2(hex[4], hex[5])?,
+        )),
+        8 => Some(Color32::from_rgba_unmultiplied(
+            byte2(hex[0], hex[1])?,
+            byte2(hex[2], hex[3])?,
+            byte2(hex[4], hex[5])?,
+            byte2(hex[6], hex[7])?,
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1097,5 +1615,21 @@ mod tests {
             "hello world".len() - 1,
             "Backspace deleted more than the character at the caret"
         );
+    }
+
+    #[test]
+    fn matching_bracket_and_hex_color() {
+        assert_eq!(matching_bracket("fn f() { a[0] }", 7), Some((7, 14)));
+        assert_eq!(matching_bracket("fn f() { a[0] }", 14), Some((7, 14)));
+        assert_eq!(parse_hex_color(b"6750A4"), Some(Color32::from_rgb(0x67, 0x50, 0xA4)));
+        assert_eq!(parse_hex_color(b"f0a"), Some(Color32::from_rgb(0xFF, 0x00, 0xAA)));
+    }
+
+    #[test]
+    fn select_all_occurrences_creates_multi_cursors() {
+        let mut doc = doc_with("foo bar foo baz foo");
+        doc.selection = Some((0, 3));
+        assert_eq!(select_all_occurrences(&mut doc), 3);
+        assert_eq!(doc.multi_cursors, vec![(0, 3), (8, 11), (16, 19)]);
     }
 }

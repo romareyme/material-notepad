@@ -6,9 +6,11 @@ mod editor;
 mod files;
 mod highlight;
 mod icons;
+mod preview;
 mod search;
 mod session;
 mod theme;
+mod transform;
 mod widgets;
 
 use eframe::egui;
@@ -18,7 +20,7 @@ fn main() -> eframe::Result<()> {
     let files: Vec<std::path::PathBuf> = std::env::args_os()
         .skip(1)
         .map(std::path::PathBuf::from)
-        .filter(|path| path.is_file())
+        .filter(|path| path.is_file() || path.is_dir())
         .collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

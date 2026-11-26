@@ -415,6 +415,7 @@ impl Typography {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub dark: bool,
+    #[allow(dead_code)]
     pub seed: Color32,
     pub scheme: Scheme,
     pub syntax: SyntaxColors,
