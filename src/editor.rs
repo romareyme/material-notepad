@@ -109,15 +109,25 @@ fn layout_job(text: &str, spans: &[Span], theme: &Theme, wrap_width: f32) -> egu
     job.wrap.max_width = wrap_width;
     let mut pos = 0usize;
     for span in spans {
-        if span.range.start > pos {
-            job.append(&text[pos..span.range.start], 0.0, base.clone());
+        let start = span.range.start;
+        let end = span.range.end;
+        if start < pos
+            || start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            continue;
+        }
+        if start > pos {
+            job.append(&text[pos..start], 0.0, base.clone());
         }
         let format = TextFormat {
             color: span.kind.color(&colors),
             ..base.clone()
         };
-        job.append(&text[span.range.clone()], 0.0, format);
-        pos = span.range.end;
+        job.append(&text[start..end], 0.0, format);
+        pos = end;
     }
     if pos < text.len() {
         job.append(&text[pos..], 0.0, base);
@@ -213,6 +223,9 @@ pub fn show(
     };
 
     let spans = cache.spans(doc);
+    let language = doc.language;
+    let initial_len = doc.text.len();
+    let mut first_layout = true;
     let background = theme.scheme.surface_container_lowest;
     let gutter_bg = theme.scheme.surface_container_low;
     let gutter_fg = theme.scheme.outline;
@@ -252,7 +265,21 @@ pub fn show(
             let width = (ui.available_width() - gutter - GUTTER_TEXT_GAP).max(120.0);
             let mut layouter = |ui: &Ui, text: &str, wrap_width: f32| {
                 let wrap = if word_wrap { wrap_width } else { f32::INFINITY };
-                let job = layout_job(text, &spans, theme, wrap);
+                // TextEdit re-runs the layouter immediately after mutating the buffer
+                // (for example, Ctrl+A followed by Backspace); using the pre-edit
+                // spans would slice out of bounds and panic.
+                let job = if first_layout && text.len() == initial_len {
+                    first_layout = false;
+                    layout_job(text, &spans, theme, wrap)
+                } else {
+                    first_layout = false;
+                    let fresh = if text.len() > MAX_HIGHLIGHT_BYTES {
+                        Vec::new()
+                    } else {
+                        highlight(text, language)
+                    };
+                    layout_job(text, &fresh, theme, wrap)
+                };
                 ui.fonts(|fonts| fonts.layout_job(job))
             };
             let output = TextEdit::multiline(&mut doc.text)
@@ -296,6 +323,7 @@ pub fn show(
 
             if output.response.changed() {
                 doc.edited();
+                doc.selection_sticky = false;
                 event.changed = true;
                 if let Some((before, c_before)) = &undo_snapshot {
                     let c_after = output
@@ -328,7 +356,7 @@ pub fn show(
                 // report for one frame, which still shows the previous caret.
                 // A sticky selection from Ctrl+A keeps winning until the user
                 // types or moves, because the widget reports its stale caret.
-                if !selection_requested && !doc.selection_sticky {
+                if (!selection_requested && !doc.selection_sticky) || output.response.changed() {
                     doc.selection = Some((a.min(b), a.max(b)));
                 }
                 doc.update_cursor(a, Some((a, b)));
@@ -1631,5 +1659,46 @@ mod tests {
         doc.selection = Some((0, 3));
         assert_eq!(select_all_occurrences(&mut doc), 3);
         assert_eq!(doc.multi_cursors, vec![(0, 3), (8, 11), (16, 19)]);
+    }
+
+    #[test]
+    fn ctrl_a_then_backspace_on_highlighted_doc_clears_safely() {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::new(true, Color32::from_rgb(103, 80, 164), 1.0, 14.0);
+        let prefs = EditorPrefs::default();
+        let mut cache = HighlightCache::default();
+        let mut doc = doc_with("fn main() {\n    println!(\"Привет\");\n}\n");
+        doc.language = Language::Rust;
+
+        let mut frame = |doc: &mut Document, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, &theme, doc, &prefs, &[], None, &mut cache);
+                });
+            });
+        };
+
+        let key = |key: Key, modifiers: egui::Modifiers| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+
+        let id = egui::Id::new(("editor", doc.id));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        frame(&mut doc, vec![]);
+        frame(&mut doc, vec![key(Key::A, egui::Modifiers::CTRL)]);
+        frame(&mut doc, vec![key(Key::Backspace, egui::Modifiers::NONE)]);
+        frame(&mut doc, vec![]);
+
+        assert_eq!(doc.text, "");
+        assert_eq!(doc.cursor.line, 1);
+        assert_eq!(doc.cursor.column, 1);
     }
 }
